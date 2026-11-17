@@ -29,7 +29,7 @@ export function UsersPage() {
     queryFn: async (): Promise<Profile[]> => {
       const { data, error } = await supabase
         .from('profiles')
-        .select('id, full_name, role, created_at')
+        .select('id, full_name, email, role, created_at')
         .order('created_at', { ascending: true })
       if (error) throw error
       return (data ?? []) as Profile[]
@@ -107,7 +107,7 @@ export function UsersPage() {
           <TableHeader>
             <TableRow>
               <TableHead>Full Name</TableHead>
-              <TableHead>User ID</TableHead>
+              <TableHead>Email</TableHead>
               <TableHead>Current Role</TableHead>
               <TableHead>Created</TableHead>
               <TableHead className="text-right">Change Role</TableHead>
@@ -124,8 +124,8 @@ export function UsersPage() {
                       <span className="ml-2 text-xs text-neutral-500">(You)</span>
                     )}
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-neutral-600">
-                    {p.id}
+                  <TableCell className="text-xs text-neutral-700">
+                    {p.email || <span className="font-mono text-neutral-400">{p.id}</span>}
                   </TableCell>
                   <TableCell>
                     <Badge
@@ -142,7 +142,8 @@ export function UsersPage() {
                     <select
                       aria-label={`Change role for ${p.full_name || p.id}`}
                       value={p.role}
-                      disabled={updateRoleMutation.isPending}
+                      disabled={isSelf || updateRoleMutation.isPending}
+                      title={isSelf ? 'You cannot change your own role' : undefined}
                       onChange={(e) => {
                         const nextRole = e.target.value as UserRole
                         updateRoleMutation.mutate({
@@ -150,7 +151,7 @@ export function UsersPage() {
                           role: nextRole,
                         })
                       }}
-                      className="h-8 rounded-md border border-neutral-300 bg-white px-2.5 text-xs font-medium text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950"
+                      className="h-8 rounded-md border border-neutral-300 bg-white px-2.5 text-xs font-medium text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {ROLES.map((r) => (
                         <option key={r} value={r}>

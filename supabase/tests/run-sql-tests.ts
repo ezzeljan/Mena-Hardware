@@ -14,10 +14,16 @@ async function runTests(): Promise<void> {
     process.exit(1)
   }
 
-  const sqlPath = path.resolve(__dirname, './rls_policies.test.sql')
-  const sql = fs.readFileSync(sqlPath, 'utf-8')
+  const testFiles = [
+    path.resolve(__dirname, './rls_policies.test.sql'),
+    path.resolve(__dirname, './phase2_rls.test.sql'),
+  ]
 
-  const client = new pg.Client({ connectionString: databaseUrl })
+  const isLocalDb = databaseUrl.includes('127.0.0.1') || databaseUrl.includes('localhost')
+  const client = new pg.Client({
+    connectionString: databaseUrl,
+    ssl: isLocalDb ? false : { rejectUnauthorized: false },
+  })
   try {
     await client.connect()
     client.on('notice', (msg) => {
@@ -25,7 +31,12 @@ async function runTests(): Promise<void> {
         console.log(`NOTICE: ${msg.message}`)
       }
     })
-    await client.query(sql)
+    for (const file of testFiles) {
+      if (fs.existsSync(file)) {
+        const sql = fs.readFileSync(file, 'utf-8')
+        await client.query(sql)
+      }
+    }
     console.log('SQL Role & RLS test suite completed successfully.')
   } catch (err) {
     console.error('SQL Test Suite Failed:', err)

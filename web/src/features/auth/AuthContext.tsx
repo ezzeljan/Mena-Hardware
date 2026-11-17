@@ -17,6 +17,8 @@ interface AuthContextValue {
   profile: Profile | null
   role: UserRole
   isAdmin: boolean
+  isEstimatorOrAdmin: boolean
+  isPmOrAdmin: boolean
   loading: boolean
   signOut: () => Promise<void>
   refreshProfile: () => Promise<void>
@@ -32,7 +34,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const fetchProfile = useCallback(async (userId: string) => {
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, full_name, role, created_at')
+      .select('id, full_name, email, role, created_at')
       .eq('id', userId)
       .maybeSingle()
 
@@ -42,6 +44,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setProfile({
         id: userId,
         full_name: '',
+        email: '',
         role: 'viewer',
         created_at: new Date().toISOString(),
       })
@@ -111,6 +114,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       profile,
       role,
       isAdmin: role === 'admin',
+      isEstimatorOrAdmin: role === 'admin' || role === 'estimator',
+      isPmOrAdmin: role === 'admin' || role === 'pm',
       loading,
       signOut,
       refreshProfile,

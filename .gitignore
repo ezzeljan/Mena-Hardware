@@ -39,3 +39,6 @@ lerna-debug.log*
 # Supabase local temp
 supabase/.branches
 supabase/.temp
+
+# Vite temporary files
+.vite/

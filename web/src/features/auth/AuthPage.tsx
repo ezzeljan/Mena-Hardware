@@ -76,7 +76,7 @@ export function AuthPage() {
         navigate('/parts', { replace: true })
       } else {
         setInfoMessage(
-          'Account created with default role "viewer". You can now sign in.',
+          'Account created with default role "viewer". If email confirmation is enabled, check your inbox before signing in.',
         )
         setMode('login')
       }

@@ -80,6 +80,44 @@ begin
     raise exception 'TEST FAILED: Expected 1 price history row on unit_cost UPDATE, got %', v_count;
   end if;
 
+  -- Admin CANNOT directly insert, update, or delete part_price_history (audit log is trigger-only)
+  v_err := false;
+  begin
+    insert into public.part_price_history (part_id, unit_cost) values (v_part_id, 1.00);
+  exception when insufficient_privilege then
+    v_err := true;
+  end;
+  if not v_err then
+    raise exception 'TEST FAILED: Admin should not be able to INSERT into part_price_history!';
+  end if;
+
+  update public.part_price_history set unit_cost = 1.00 where part_id = v_part_id;
+  get diagnostics v_updated = row_count;
+  if v_updated > 0 then
+    raise exception 'TEST FAILED: Admin should not be able to UPDATE part_price_history!';
+  end if;
+
+  delete from public.part_price_history where part_id = v_part_id;
+  get diagnostics v_updated = row_count;
+  if v_updated > 0 then
+    raise exception 'TEST FAILED: Admin should not be able to DELETE from part_price_history!';
+  end if;
+
+  -- Admin CANNOT change their own role
+  update public.profiles set role = 'viewer' where id = v_admin_id;
+  get diagnostics v_updated = row_count;
+  if v_updated > 0 then
+    raise exception 'TEST FAILED: Admin should not be able to change their own role!';
+  end if;
+
+  -- Admin CAN change another user's role
+  update public.profiles set role = 'pm' where id = v_viewer_id;
+  get diagnostics v_updated = row_count;
+  if v_updated <> 1 then
+    raise exception 'TEST FAILED: Admin should be able to update another user role!';
+  end if;
+  update public.profiles set role = 'viewer' where id = v_viewer_id;
+
   -- Admin can insert standard_set and standard_set_lines (including NULL unit_price)
   insert into public.standard_sets (room_name, classification, leaf, door_size)
   values ('TEST ROOM RLS', 'FIRE RATED', 'SINGLE', '2040 x 920')
@@ -88,6 +126,22 @@ begin
   insert into public.standard_set_lines (set_id, position, sku, description, qty, unit_price)
   values (v_set_id, 1, 'TEST-SKU-RLS', 'NOVAS TEST PART', 2, null)
   returning id into v_line_id;
+
+  -- Admin can reorder lines atomically via swap_standard_set_lines RPC
+  declare
+    v_line2_id uuid;
+    v_pos1 integer;
+  begin
+    insert into public.standard_set_lines (set_id, position, sku, description, qty, unit_price)
+    values (v_set_id, 2, 'TEST-SKU-RLS-2', 'NOVAS TEST PART 2', 1, 10)
+    returning id into v_line2_id;
+
+    perform public.swap_standard_set_lines(v_line_id, v_line2_id);
+    select position into v_pos1 from public.standard_set_lines where id = v_line_id;
+    if v_pos1 <> 2 then
+      raise exception 'TEST FAILED: Expected line 1 position to swap to 2, got %', v_pos1;
+    end if;
+  end;
 
   -- ---------------------------------------------------------------------------
   -- 3. Test non-admin roles: VIEWER, ESTIMATOR, PM
@@ -144,7 +198,7 @@ begin
         raise exception 'TEST FAILED: % could not read standard_set_lines', v_label;
       end if;
 
-      -- Cannot INSERT manufacturer
+      -- Cannot INSERT, UPDATE, or DELETE manufacturer
       v_err := false;
       begin
         insert into public.manufacturers (name) values ('UNAUTHORIZED_' || v_label);
@@ -153,6 +207,35 @@ begin
       end;
       if not v_err then
         raise exception 'TEST FAILED: % was able to INSERT into manufacturers!', v_label;
+      end if;
+
+      update public.manufacturers set name = 'HACKED' where id = v_mfg_id;
+      get diagnostics v_updated = row_count;
+      if v_updated > 0 then
+        raise exception 'TEST FAILED: % was able to UPDATE manufacturers!', v_label;
+      end if;
+
+      delete from public.manufacturers where id = v_mfg_id;
+      get diagnostics v_updated = row_count;
+      if v_updated > 0 then
+        raise exception 'TEST FAILED: % was able to DELETE manufacturers!', v_label;
+      end if;
+
+      -- Cannot INSERT or DELETE profiles
+      v_err := false;
+      begin
+        insert into public.profiles (id, full_name, role) values (gen_random_uuid(), 'FAKE', 'admin');
+      exception when insufficient_privilege then
+        v_err := true;
+      end;
+      if not v_err then
+        raise exception 'TEST FAILED: % was able to INSERT into profiles!', v_label;
+      end if;
+
+      delete from public.profiles where id = v_uid;
+      get diagnostics v_updated = row_count;
+      if v_updated > 0 then
+        raise exception 'TEST FAILED: % was able to DELETE from profiles!', v_label;
       end if;
 
       -- Cannot UPDATE part
@@ -178,6 +261,18 @@ begin
       end;
       if not v_err then
         raise exception 'TEST FAILED: % was able to INSERT into standard_sets!', v_label;
+      end if;
+
+      update public.standard_sets set room_name = 'HACKED_SET' where id = v_set_id;
+      get diagnostics v_updated = row_count;
+      if v_updated > 0 then
+        raise exception 'TEST FAILED: % was able to UPDATE standard_sets!', v_label;
+      end if;
+
+      delete from public.standard_sets where id = v_set_id;
+      get diagnostics v_updated = row_count;
+      if v_updated > 0 then
+        raise exception 'TEST FAILED: % was able to DELETE standard_sets!', v_label;
       end if;
 
       update public.standard_set_lines set qty = 99 where id = v_line_id;

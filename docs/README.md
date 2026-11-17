@@ -6,7 +6,7 @@ Foundation web application for the Mena Contractors door hardware team. Replaces
 
 ## Architecture & Stack
 
-- **Frontend (`/web`):** React 18, TypeScript (`strict: true`, no `any`), Vite, Tailwind CSS v4 (strictly monochrome B&W design, Inter font), shadcn/ui primitives, `lucide-react`, TanStack Query, TanStack Table, React Hook Form, Zod, React Router.
+- **Frontend (`/web`):** React 18, TypeScript (`strict: true`, no `any`), Vite, Tailwind CSS v4 (strictly monochrome B&W design, Google Sans font), shadcn/ui primitives, `lucide-react`, TanStack Query, TanStack Table, React Hook Form, Zod, React Router.
 - **Backend (`/supabase`):** Supabase (PostgreSQL, Auth, Row Level Security).
   - The browser app uses **only** the public `VITE_SUPABASE_ANON_KEY`.
   - No `service_role` key is ever referenced or bundled in `/web`.
@@ -83,7 +83,7 @@ npm install
   npx supabase db push
   ```
 - **Option B — Using Direct Postgres / SQL Editor:**
-  Run the contents of [`supabase/migrations/20261116000001_initial_schema.sql`](../supabase/migrations/20261116000001_initial_schema.sql) in the Supabase SQL Editor or via `psql "$DATABASE_URL" -f supabase/migrations/20261116000001_initial_schema.sql`.
+  Run [`supabase/migrations/20261116000001_initial_schema.sql`](../supabase/migrations/20261116000001_initial_schema.sql) followed by [`supabase/migrations/20261117000002_harden_rls_and_history.sql`](../supabase/migrations/20261117000002_harden_rls_and_history.sql) in the Supabase SQL Editor or via `psql "$DATABASE_URL"`.
 
 ### Step 4: Seed the 65 Standard Sets & Parts Library
 
@@ -93,12 +93,15 @@ From `/web`:
 # Preview the Manufacturer Mapping Summary & Data Issues Report without touching the DB:
 npm run seed:dry-run
 
-# Run the idempotent seed against DATABASE_URL:
+# Run the idempotent seed against DATABASE_URL (inserts new rows without overwriting admin UI edits):
 npm run seed
+
+# Deactivate stale seeded parts/sets removed from the workbook (preserves UI-created rows):
+npm run seed -- --prune
 ```
-- Loads all **7 manufacturers** (`MM` marked `is_owner_supplied = true`, `NOVAS`, `LOCKWOOD`, `SCOPE`, `GEZE`, `FSH`, `OTHER`), **71 library parts**, and all **65 standard sets** with their part lines.
+- Loads all **7 manufacturers** (`MM` marked `is_owner_supplied = true`, `NOVAS`, `LOCKWOOD`, `SCOPE`, `GEZE`, `FSH`, `OTHER`), **59 library parts**, and all **65 standard sets** with their part lines.
 - Preserves intentional `NULL` prices (`505BC+SLC` and `L505 BC` have `unit_cost = NULL`, never `0`).
-- Imports Set #65 (`KITCHEN` / `FIRE RATED - PIVOT`) into `standard_sets` and `standard_set_lines` as written, excludes its mismatched lines from `parts`, and prints the **Data Issues Report**.
+- Flags any genuine SKU-to-description mismatches or blank quantities in the **Data Issues Report**.
 - Re-running `npm run seed` is completely idempotent (`0` rows duplicated or spuriously updated).
 
 ### Step 5: Run the Web App

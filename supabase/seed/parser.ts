@@ -1,5 +1,13 @@
 import fs from 'node:fs'
-import XLSX from 'xlsx'
+import { createRequire } from 'node:module'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type ExcelJS from 'exceljs'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const requireFromWeb = createRequire(path.resolve(__dirname, '../../web/package.json'))
+const ExcelJSRuntime = requireFromWeb('exceljs') as typeof ExcelJS
 
 export interface ParsedSetLine {
   position: number
@@ -11,6 +19,7 @@ export interface ParsedSetLine {
 
 export interface ParsedStandardSet {
   setIndex: number
+  seedKey: string
   room_name: string
   door_tag: string
   door_size: string
@@ -83,38 +92,85 @@ function parseNullableNumber(raw: unknown): number | null {
   return Math.round(num * 1000) / 1000
 }
 
-export function parseHardwareWorkbook(xlsxPath: string): SeedParseResult {
+function unwrapCellValue(val: ExcelJS.CellValue): unknown {
+  if (val === null || val === undefined) return null
+  if (typeof val === 'object') {
+    if ('result' in val) {
+      return val.result ?? null
+    }
+    if ('richText' in val && Array.isArray(val.richText)) {
+      return val.richText.map((part) => part.text).join('')
+    }
+    if ('text' in val) {
+      return val.text
+    }
+  }
+  return val
+}
+
+function sheetToRows(sheet: ExcelJS.Worksheet): unknown[][] {
+  const rows: unknown[][] = []
+  const maxRow = sheet.rowCount
+  const maxCol = Math.max(sheet.columnCount, 12)
+
+  for (let r = 1; r <= maxRow; r++) {
+    const row = sheet.getRow(r)
+    const arr: unknown[] = []
+    for (let c = 1; c <= maxCol; c++) {
+      arr.push(unwrapCellValue(row.getCell(c).value))
+    }
+    rows.push(arr)
+  }
+  return rows
+}
+
+function tokenizeDescription(desc: string): Set<string> {
+  return new Set(
+    desc
+      .toUpperCase()
+      .replace(/[^A-Z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length >= 3),
+  )
+}
+
+function descriptionsConflict(a: string, b: string): boolean {
+  const tokensA = tokenizeDescription(a)
+  const tokensB = tokenizeDescription(b)
+  if (tokensA.size === 0 || tokensB.size === 0) return false
+  for (const t of tokensA) {
+    if (tokensB.has(t)) return false
+  }
+  return true
+}
+
+export async function parseHardwareWorkbook(xlsxPath: string): Promise<SeedParseResult> {
   if (!fs.existsSync(xlsxPath)) {
     throw new Error(`Excel file not found at: ${xlsxPath}`)
   }
 
-  const wb = XLSX.readFile(xlsxPath)
-  const hardwareSheetName = wb.SheetNames.find(
-    (n: string) => n.trim().toUpperCase() === 'HARDWARE',
+  const wb = new ExcelJSRuntime.Workbook()
+  await wb.xlsx.readFile(xlsxPath)
+
+  const hardwareSheet = wb.worksheets.find(
+    (ws) => ws.name.trim().toUpperCase() === 'HARDWARE',
   )
-  const osmSheetName = wb.SheetNames.find((n: string) =>
-    n.toUpperCase().includes('OSM'),
+  const osmSheet = wb.worksheets.find((ws) =>
+    ws.name.toUpperCase().includes('OSM'),
   )
 
-  if (!hardwareSheetName) {
+  if (!hardwareSheet) {
     throw new Error(`Sheet "HARDWARE" not found in ${xlsxPath}`)
   }
 
-  const hwRows = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[hardwareSheetName], {
-    header: 1,
-    defval: null,
-  })
-
+  const hwRows = sheetToRows(hardwareSheet)
   const sets: ParsedStandardSet[] = []
   const dataIssues: DataIssue[] = []
   const partsMap = new Map<string, ParsedPart>()
 
   // 1. Parse OSM sheet first (owner-supplied MM parts)
-  if (osmSheetName) {
-    const osmRows = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[osmSheetName], {
-      header: 1,
-      defval: null,
-    })
+  if (osmSheet) {
+    const osmRows = sheetToRows(osmSheet)
 
     for (let i = 0; i < osmRows.length; i++) {
       const row = osmRows[i]
@@ -125,7 +181,13 @@ export function parseHardwareWorkbook(xlsxPath: string): SeedParseResult {
       const description = String(row[3] ?? '').trim()
       const unitCost = parseNullableNumber(row[4])
 
-      if (!sku || col0 === 'LEGEND' || sku.toUpperCase().includes('PART NUMBER')) {
+      if (
+        !sku ||
+        col0 === 'LEGEND' ||
+        col0.includes('OWNER SUPPLIED') ||
+        sku.toUpperCase().includes('PART NUMBER') ||
+        sku.toUpperCase().includes('OWNER SUPPLIED')
+      ) {
         continue
       }
 
@@ -146,6 +208,7 @@ export function parseHardwareWorkbook(xlsxPath: string): SeedParseResult {
 
   // 2. Parse HARDWARE sheet for standard sets and part lines
   let currentSet: ParsedStandardSet | null = null
+  const setKeyOccurrences = new Map<string, number>()
 
   for (let i = 0; i < hwRows.length; i++) {
     const row = hwRows[i]
@@ -168,13 +231,24 @@ export function parseHardwareWorkbook(xlsxPath: string): SeedParseResult {
 
     // Header row for a standard set is marked by col6 === "DOOR QTY:"
     if (col6.toUpperCase() === 'DOOR QTY:') {
+      const leaf = normalizeLeaf(col4)
+      const baseKey = [
+        col0.toUpperCase(),
+        col3.toUpperCase(),
+        leaf,
+        col2.replace(/\s+/g, '').toUpperCase(),
+      ].join('|')
+      const occ = (setKeyOccurrences.get(baseKey) ?? 0) + 1
+      setKeyOccurrences.set(baseKey, occ)
+
       currentSet = {
         setIndex: sets.length + 1,
+        seedKey: `set:${baseKey}#${occ}`,
         room_name: col0,
         door_tag: col1,
         door_size: col2,
         classification: col3,
-        leaf: normalizeLeaf(col4),
+        leaf,
         lines: [],
       }
       sets.push(currentSet)
@@ -183,12 +257,30 @@ export function parseHardwareWorkbook(xlsxPath: string): SeedParseResult {
 
     // Part row inside a standard set
     if (currentSet && (col5 !== '' || col6 !== '')) {
-      // Skip header/title rows if any
-      if (col5.toUpperCase().includes('PART NUMBER') || col6.toUpperCase().includes('HARDWARE DESCRIPTION')) {
+      if (
+        col5.toUpperCase().includes('PART NUMBER') ||
+        col6.toUpperCase().includes('HARDWARE DESCRIPTION')
+      ) {
         continue
       }
 
-      const qty = parseNullableNumber(col7) ?? 1
+      const parsedQty = parseNullableNumber(col7)
+      if (parsedQty === null) {
+        dataIssues.push({
+          setIndex: currentSet.setIndex,
+          room_name: currentSet.room_name,
+          classification: currentSet.classification,
+          reason: `Blank or non-numeric quantity on line "${col5 || col6}". Recorded as 0 rather than inventing a quantity.`,
+          affectedLines: [
+            {
+              sku: col5,
+              description: col6,
+              unit_price: parseNullableNumber(col8),
+            },
+          ],
+        })
+      }
+      const qty = parsedQty ?? 0
       const unitPrice = parseNullableNumber(col8)
       const position = currentSet.lines.length + 1
 
@@ -202,19 +294,52 @@ export function parseHardwareWorkbook(xlsxPath: string): SeedParseResult {
     }
   }
 
-  // 3. Process sets for parts library & detect known data issues (KITCHEN / FIRE RATED - PIVOT)
+  // 3. Build canonical SKU -> description frequency map to detect mismatched sets dynamically
+  const skuDescCounts = new Map<string, Map<string, number>>()
+  for (const part of partsMap.values()) {
+    const counts = new Map<string, number>()
+    counts.set(part.description, 10) // OSM sheet is authoritative
+    skuDescCounts.set(part.sku, counts)
+  }
   for (const set of sets) {
-    const isKitchenPivot =
-      set.room_name.toUpperCase() === 'KITCHEN' &&
-      set.classification.toUpperCase().includes('FIRE RATED - PIVOT')
+    for (const line of set.lines) {
+      if (!line.sku) continue
+      let counts = skuDescCounts.get(line.sku)
+      if (!counts) {
+        counts = new Map<string, number>()
+        skuDescCounts.set(line.sku, counts)
+      }
+      counts.set(line.description, (counts.get(line.description) ?? 0) + 1)
+    }
+  }
 
-    if (isKitchenPivot) {
+  const canonicalDescBySku = new Map<string, string>()
+  for (const [sku, counts] of skuDescCounts.entries()) {
+    let bestDesc = ''
+    let bestCount = -1
+    for (const [desc, count] of counts.entries()) {
+      if (count > bestCount) {
+        bestCount = count
+        bestDesc = desc
+      }
+    }
+    canonicalDescBySku.set(sku, bestDesc)
+  }
+
+  // 4. Process sets for parts library & flag sets with genuine SKU-to-description mismatches
+  for (const set of sets) {
+    const mismatchedLines = set.lines.filter((line) => {
+      if (!line.sku) return false
+      const canonical = canonicalDescBySku.get(line.sku)
+      return canonical ? descriptionsConflict(line.description, canonical) : false
+    })
+
+    if (mismatchedLines.length >= 2) {
       dataIssues.push({
         setIndex: set.setIndex,
         room_name: set.room_name,
         classification: set.classification,
-        reason:
-          'SKUs in KITCHEN (FIRE RATED - PIVOT) do not match their hardware descriptions. Set imported as written; lines excluded from the Parts Library.',
+        reason: `SKUs in ${set.room_name} (${set.classification}) do not match their canonical hardware descriptions. Set imported as written; lines excluded from the Parts Library.`,
         affectedLines: set.lines.map((l) => ({
           sku: l.sku,
           description: l.description,

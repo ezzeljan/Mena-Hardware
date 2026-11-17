@@ -68,6 +68,7 @@ export function PartsLibraryPage() {
   const [editingPart, setEditingPart] = useState<Part | null>(null)
   const [historyPart, setHistoryPart] = useState<Part | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const form = useForm<PartFormValues>({
     resolver: zodResolver(partFormSchema),
@@ -169,7 +170,11 @@ export function PartsLibraryPage() {
       if (error) throw error
     },
     onSuccess: async () => {
+      setActionError(null)
       await queryClient.invalidateQueries({ queryKey: ['parts'] })
+    },
+    onError: (err: Error) => {
+      setActionError(err.message)
     },
   })
 
@@ -350,7 +355,16 @@ export function PartsLibraryPage() {
                     variant="outline"
                     size="sm"
                     title={part.active ? 'Deactivate part' : 'Reactivate part'}
-                    onClick={() => toggleActiveMutation.mutate(part)}
+                    disabled={toggleActiveMutation.isPending}
+                    onClick={() => {
+                      if (
+                        part.active &&
+                        !window.confirm(`Deactivate part ${part.sku}?`)
+                      ) {
+                        return
+                      }
+                      toggleActiveMutation.mutate(part)
+                    }}
                   >
                     {part.active ? (
                       <>
@@ -468,6 +482,15 @@ export function PartsLibraryPage() {
           Showing {filteredParts.length} part{filteredParts.length === 1 ? '' : 's'}
         </div>
       </div>
+
+      {actionError && (
+        <div
+          role="alert"
+          className="border border-neutral-950 bg-neutral-100 p-3 text-xs font-medium text-neutral-950"
+        >
+          Action failed: {actionError}
+        </div>
+      )}
 
       {/* Table State */}
       {partsQuery.isLoading ? (

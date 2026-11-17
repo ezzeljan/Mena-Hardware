@@ -8,7 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
-      xlsx: path.resolve(__dirname, './node_modules/xlsx'),
+      exceljs: path.resolve(__dirname, './node_modules/exceljs'),
     },
   },
   test: {

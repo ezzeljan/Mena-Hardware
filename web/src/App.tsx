@@ -7,6 +7,8 @@ import { PartsLibraryPage } from '@/features/parts/PartsLibraryPage'
 import { ManufacturersPage } from '@/features/manufacturers/ManufacturersPage'
 import { StandardSetsPage } from '@/features/standard-sets/StandardSetsPage'
 import { StandardSetDetailPage } from '@/features/standard-sets/StandardSetDetailPage'
+import { ProjectsPage } from '@/features/projects/ProjectsPage'
+import { ProjectDetailPage } from '@/features/projects/ProjectDetailPage'
 import { UsersPage } from '@/features/users/UsersPage'
 
 const queryClient = new QueryClient({
@@ -27,6 +29,8 @@ export default function App() {
             <Route path="/login" element={<AuthPage />} />
             <Route element={<AppShell />}>
               <Route index element={<Navigate to="/parts" replace />} />
+              <Route path="/projects" element={<ProjectsPage />} />
+              <Route path="/projects/:id" element={<ProjectDetailPage />} />
               <Route path="/parts" element={<PartsLibraryPage />} />
               <Route path="/manufacturers" element={<ManufacturersPage />} />
               <Route path="/standard-sets" element={<StandardSetsPage />} />

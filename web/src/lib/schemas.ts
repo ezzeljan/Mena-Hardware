@@ -124,3 +124,18 @@ export const updateUserRoleSchema = z.object({
   userId: z.string().uuid(),
   role: userRoleSchema,
 })
+
+export const projectStatusSchema = z.enum(['active', 'archived'])
+
+export const projectFormSchema = z.object({
+  name: z.string().trim().min(1, 'Project name is required').max(160, 'Project name is too long'),
+  client: z.string().trim().max(160, 'Client name is too long'),
+  site: z.string().trim().max(200, 'Site address is too long'),
+  status: projectStatusSchema,
+  assigned_pm: z.string().refine(
+    (val) => val === '' || z.string().uuid().safeParse(val).success,
+    { message: 'Invalid PM selection' },
+  ),
+})
+
+export type ProjectFormValues = z.infer<typeof projectFormSchema>
