@@ -76,6 +76,7 @@ describe('Shared Zod Schemas & Price Parsing', () => {
 
   it('validates project form schema', () => {
     const valid = projectFormSchema.safeParse({
+      reference_no: 'SV002',
       name: 'Harborview Apartments',
       client: 'Mena Contractors',
       site: 'Sydney CBD',
@@ -85,6 +86,7 @@ describe('Shared Zod Schemas & Price Parsing', () => {
     expect(valid.success).toBe(true)
 
     const missingName = projectFormSchema.safeParse({
+      reference_no: '',
       name: '   ',
       client: '',
       site: '',

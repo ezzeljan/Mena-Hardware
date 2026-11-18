@@ -15,6 +15,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
+// Self sign-up is hidden unless explicitly enabled. It must also be enabled in
+// Supabase Auth settings; with it off, accounts are created by an admin.
+const ALLOW_SIGNUP = import.meta.env.VITE_ALLOW_SIGNUP === 'true'
+
 export function AuthPage() {
   const { session, loading } = useAuth()
   const navigate = useNavigate()
@@ -102,46 +106,48 @@ export function AuthPage() {
           </div>
         </div>
 
-        <div
-          role="tablist"
-          aria-label="Authentication mode"
-          className="grid grid-cols-2 border border-neutral-300 p-0.5 mb-6 bg-neutral-100"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === 'login'}
-            onClick={() => {
-              setMode('login')
-              setServerError(null)
-              setInfoMessage(null)
-            }}
-            className={`py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer ${
-              mode === 'login'
-                ? 'bg-neutral-950 text-white'
-                : 'text-neutral-700 hover:text-neutral-950'
-            }`}
+        {ALLOW_SIGNUP && (
+          <div
+            role="tablist"
+            aria-label="Authentication mode"
+            className="grid grid-cols-2 border border-neutral-300 p-0.5 mb-6 bg-neutral-100"
           >
-            Sign In
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === 'signup'}
-            onClick={() => {
-              setMode('signup')
-              setServerError(null)
-              setInfoMessage(null)
-            }}
-            className={`py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer ${
-              mode === 'signup'
-                ? 'bg-neutral-950 text-white'
-                : 'text-neutral-700 hover:text-neutral-950'
-            }`}
-          >
-            Create Account
-          </button>
-        </div>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'login'}
+              onClick={() => {
+                setMode('login')
+                setServerError(null)
+                setInfoMessage(null)
+              }}
+              className={`py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer ${
+                mode === 'login'
+                  ? 'bg-neutral-950 text-white'
+                  : 'text-neutral-700 hover:text-neutral-950'
+              }`}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'signup'}
+              onClick={() => {
+                setMode('signup')
+                setServerError(null)
+                setInfoMessage(null)
+              }}
+              className={`py-1.5 text-xs font-semibold uppercase tracking-wider transition-colors cursor-pointer ${
+                mode === 'signup'
+                  ? 'bg-neutral-950 text-white'
+                  : 'text-neutral-700 hover:text-neutral-950'
+              }`}
+            >
+              Create Account
+            </button>
+          </div>
+        )}
 
         {serverError && (
           <div

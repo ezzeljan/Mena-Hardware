@@ -1,3 +1,4 @@
+import { Suspense } from 'react'
 import { Navigate, Outlet } from 'react-router-dom'
 import { LogOut } from 'lucide-react'
 import { useAuth } from '@/features/auth/AuthContext'
@@ -30,7 +31,7 @@ export function AppShell() {
 
   return (
     <div className="min-h-screen flex bg-white text-neutral-950">
-      <Sidebar isAdmin={isAdmin} />
+      <Sidebar isAdmin={isAdmin} role={role} />
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -66,7 +67,14 @@ export function AppShell() {
         </header>
 
         <main className="flex-1 p-6 overflow-auto">
-          <Outlet />
+          {/* Pages load on first visit (see App.tsx). */}
+          <Suspense
+            fallback={
+              <div className="p-10 text-center text-sm text-neutral-600">Loading...</div>
+            }
+          >
+            <Outlet />
+          </Suspense>
         </main>
       </div>
     </div>

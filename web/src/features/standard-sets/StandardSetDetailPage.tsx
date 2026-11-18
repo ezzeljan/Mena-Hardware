@@ -13,6 +13,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { fetchAllRows } from '@/lib/fetchAll'
 import { useAuth } from '@/features/auth/AuthContext'
 import {
   parseNullablePriceInput,
@@ -94,16 +95,17 @@ export function StandardSetDetailPage() {
 
   const partsQuery = useQuery({
     queryKey: ['parts', 'autocomplete'],
-    queryFn: async (): Promise<Part[]> => {
-      const { data, error } = await supabase
-        .from('parts')
-        .select(
-          'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
-        )
-        .order('sku', { ascending: true })
-      if (error) throw error
-      return (data ?? []) as Part[]
-    },
+    queryFn: (): Promise<Part[]> =>
+      fetchAllRows<Part>((from, to) =>
+        supabase
+          .from('parts')
+          .select(
+            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
+          )
+          .order('sku', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, to),
+      ),
   })
 
   const sortedLines = useMemo(() => {
@@ -543,6 +545,8 @@ export function StandardSetDetailPage() {
                   <option value="SINGLE">SINGLE</option>
                   <option value="DOUBLE">DOUBLE</option>
                   <option value="CAVITY SINGLE">CAVITY SINGLE</option>
+                  <option value="CAVITY DOUBLE">CAVITY DOUBLE</option>
+                  <option value="TRIPLE">TRIPLE</option>
                   <option value="">Empty / Pivot</option>
                 </select>
               </div>

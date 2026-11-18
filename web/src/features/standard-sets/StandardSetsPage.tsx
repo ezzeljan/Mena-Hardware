@@ -212,6 +212,8 @@ export function StandardSetsPage() {
             <option value="SINGLE">SINGLE</option>
             <option value="DOUBLE">DOUBLE</option>
             <option value="CAVITY SINGLE">CAVITY SINGLE</option>
+            <option value="CAVITY DOUBLE">CAVITY DOUBLE</option>
+            <option value="TRIPLE">TRIPLE</option>
             <option value="EMPTY">Unspecified / Pivot</option>
           </select>
 
@@ -406,6 +408,8 @@ export function StandardSetsPage() {
                   <option value="SINGLE">SINGLE</option>
                   <option value="DOUBLE">DOUBLE</option>
                   <option value="CAVITY SINGLE">CAVITY SINGLE</option>
+                  <option value="CAVITY DOUBLE">CAVITY DOUBLE</option>
+                  <option value="TRIPLE">TRIPLE</option>
                   <option value="">Empty / Pivot</option>
                 </select>
               </div>

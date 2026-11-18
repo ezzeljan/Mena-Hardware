@@ -1,7 +1,10 @@
-import ExcelJS from 'exceljs';
+import type ExcelJS from 'exceljs';
+// Relative path (not '@/') so the parser also loads in the Playwright tests.
+import { loadExcelJS } from '../../lib/loadExcelJS';
 
 export interface ParsedQuotationDoor {
   door_ref: string;
+  door_tag: string;
   room_name: string;
   classification: string | null;
   leaf: string | null;
@@ -13,6 +16,7 @@ export interface ParsedQuotationDoor {
 export interface ParsedDoorGroupPreview {
   position: number;
   group_key: string;
+  door_tag: string;
   room_name: string;
   classification: string | null;
   leaf: string | null;
@@ -161,9 +165,13 @@ function isPlaceholder(val: string): boolean {
   return t === '' || t === '.' || t === '-';
 }
 
-function isExcludedValue(val: string): boolean {
+/**
+ * Rows marked as not in Mena's hardware scope: "EXCLUDED", "Excl.", "(Ex.)", "Ex."
+ * and "BY OTHERS" / "SUPPLIED BY OTHERS" / "BY OTHER".
+ */
+export function isExcludedValue(val: string): boolean {
   if (!val) return false;
-  return /\bexcluded\b|\bexcl\.?\b|\(ex\.?\)|^ex\.?$/i.test(val.trim());
+  return /\bexcluded\b|\bexcl\.?\b|\(ex\.?\)|^ex\.?$|\bby\s+others?\b/i.test(val.trim());
 }
 
 export function normalizeClassification(frl: string, leafType: string): string | null {
@@ -234,7 +242,8 @@ export function normalizeDoorSize(
 export async function parseQuotationWorkbook(
   buffer: ArrayBuffer | Uint8Array
 ): Promise<QuotationParseResult> {
-  const wb = new ExcelJS.Workbook();
+  const ExcelJSLib = await loadExcelJS();
+  const wb = new ExcelJSLib.Workbook();
   await wb.xlsx.load(buffer as ArrayBuffer);
 
   const { ws, headerRow, cols } = findQuotationSheet(wb);
@@ -351,8 +360,11 @@ export async function parseQuotationWorkbook(
       });
     }
 
+    const doorTag = isPlaceholder(doorType) ? '' : doorType.trim();
+
     doors.push({
       door_ref: rawRef,
+      door_tag: doorTag,
       room_name: roomName.toUpperCase(),
       classification,
       leaf,
@@ -366,6 +378,7 @@ export async function parseQuotationWorkbook(
   const groupMap = new Map<string, ParsedDoorGroupPreview>();
   for (const d of doors) {
     const key = [
+      d.door_tag || '—',
       d.room_name,
       d.classification ?? 'UNKNOWN',
       d.leaf ?? 'UNKNOWN',
@@ -380,6 +393,7 @@ export async function parseQuotationWorkbook(
       groupMap.set(key, {
         position: groupMap.size + 1,
         group_key: key,
+        door_tag: d.door_tag,
         room_name: d.room_name,
         classification: d.classification,
         leaf: d.leaf,

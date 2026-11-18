@@ -2,14 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
-  ArrowDown,
-  ArrowUp,
   Check,
+  Download,
   Loader2,
-  Plus,
-  Trash2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { fetchAllRows } from '@/lib/fetchAll'
 import { formatCurrency } from '@/lib/utils'
 import { parseNullablePriceInput } from '@/lib/schemas'
 import type {
@@ -18,19 +16,25 @@ import type {
   ProjectLine,
   ProjectVersion,
 } from '@/types/database'
-import { SkuAutocomplete } from '@/features/standard-sets/SkuAutocomplete'
+import { fetchVersionGroups, fetchVersionLines } from '@/features/projects/projectData'
+import { GridCellEditor } from '@/features/projects/GridCellEditor'
+import { GroupRowsFragment, type EditableCol } from '@/features/projects/ProjectGridGroupRows'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 
 interface ProjectGridPanelProps {
   projectName: string
   builderName: string
   activeVersion: ProjectVersion | null
   canEdit: boolean
+  canEditPmRemarks?: boolean
+  /**
+   * Receives a function that saves all pending edits now and resolves true when
+   * nothing is left unsaved. Used to save before submitting (B6).
+   */
+  onRegisterSavePending?: (savePending: (() => Promise<boolean>) | null) => void
 }
 
-type EditableCol = 0 | 1 | 2 | 3 // 0: sku, 1: description, 2: qty_per_door, 3: unit_price
 type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error'
 
 export function ProjectGridPanel({
@@ -38,79 +42,67 @@ export function ProjectGridPanel({
   builderName,
   activeVersion,
   canEdit,
+  canEditPmRemarks = false,
+  onRegisterSavePending,
 }: ProjectGridPanelProps) {
   const queryClient = useQueryClient()
   const isDraft = activeVersion?.status === 'draft'
   const editable = canEdit && isDraft
+  const pmRemarksEditable =
+    canEditPmRemarks && activeVersion?.status === 'submitted'
 
   const [lines, setLines] = useState<ProjectLine[]>([])
   const [markupPct, setMarkupPct] = useState<number>(15)
   const [markupInput, setMarkupInput] = useState<string>('15.00')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
+  const [exporting, setExporting] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [focusedCell, setFocusedCell] = useState<{
     lineId: string
     col: EditableCol
   } | null>(null)
+  // The cell being edited and its starting text (the typed text lives in GridCellEditor).
   const [editingCell, setEditingCell] = useState<{
     lineId: string
     col: EditableCol
+    initial: string
   } | null>(null)
-  const [draftValue, setDraftValue] = useState('')
 
   const dirtyIdsRef = useRef<Set<string>>(new Set())
   const linesRef = useRef<ProjectLine[]>([])
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Saves run one after another, never in parallel.
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve())
   const cellRefs = useRef<Map<string, HTMLDivElement>>(new Map())
 
   const groupsQuery = useQuery({
     queryKey: ['door_groups', activeVersion?.id],
     enabled: !!activeVersion?.id,
-    queryFn: async (): Promise<DoorGroup[]> => {
-      const { data, error } = await supabase
-        .from('door_groups')
-        .select(
-          'id, version_id, position, group_key, room_name, classification, leaf, door_size, door_qty, matched_set_id, match_status, match_score, match_reason, pm_remarks, created_at, updated_at',
-        )
-        .eq('version_id', activeVersion!.id)
-        .order('position', { ascending: true })
-      if (error) throw error
-      return (data ?? []) as DoorGroup[]
-    },
+    queryFn: (): Promise<DoorGroup[]> => fetchVersionGroups(activeVersion!.id),
   })
 
   const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data])
-  const groupIds = useMemo(() => groups.map((g) => g.id), [groups])
 
   const projectLinesQuery = useQuery({
-    queryKey: ['project_lines', activeVersion?.id, groupIds],
-    enabled: !!activeVersion?.id && groupIds.length > 0,
-    queryFn: async (): Promise<ProjectLine[]> => {
-      const { data, error } = await supabase
-        .from('project_lines')
-        .select(
-          'id, group_id, position, sku, description, qty_per_door, unit_price, origin, part_id, created_at, updated_at',
-        )
-        .in('group_id', groupIds)
-        .order('position', { ascending: true })
-      if (error) throw error
-      return (data ?? []) as ProjectLine[]
-    },
+    queryKey: ['project_lines', activeVersion?.id],
+    enabled: !!activeVersion?.id,
+    queryFn: (): Promise<ProjectLine[]> => fetchVersionLines(activeVersion!.id),
   })
 
   const partsQuery = useQuery({
     queryKey: ['parts', 'for-grid'],
-    queryFn: async (): Promise<Part[]> => {
-      const { data, error } = await supabase
-        .from('parts')
-        .select(
-          'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
-        )
-        .eq('active', true)
-        .order('sku', { ascending: true })
-      if (error) throw error
-      return (data ?? []) as Part[]
-    },
+    queryFn: (): Promise<Part[]> =>
+      fetchAllRows<Part>((from, to) =>
+        supabase
+          .from('parts')
+          .select(
+            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
+          )
+          .eq('active', true)
+          .order('sku', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, to),
+      ),
   })
 
   const parts = useMemo(() => partsQuery.data ?? [], [partsQuery.data])
@@ -126,40 +118,89 @@ export function ProjectGridPanel({
     linesRef.current = lines
   }, [lines])
 
-  const flushDirtyLines = useCallback(async () => {
+  const runFlush = useCallback(async () => {
+    const versionId = activeVersion?.id
     const ids = Array.from(dirtyIdsRef.current)
-    if (ids.length === 0) return
-    dirtyIdsRef.current.clear()
+    if (ids.length === 0 || !versionId) return
+    // Take these ids out of the queue while they save; edits made meanwhile re-queue themselves.
+    for (const id of ids) dirtyIdsRef.current.delete(id)
     setSaveStatus('saving')
     setSaveError(null)
 
-    try {
-      const currentMap = new Map(linesRef.current.map((l) => [l.id, l]))
-      for (const id of ids) {
-        const line = currentMap.get(id)
-        if (!line) continue
-        const { error } = await supabase
-          .from('project_lines')
-          .update({
-            sku: line.sku,
-            description: line.description,
-            qty_per_door: line.qty_per_door,
-            unit_price: line.unit_price,
-            origin: line.origin,
-            part_id: line.part_id,
-          })
-          .eq('id', line.id)
-        if (error) throw error
-      }
-      setSaveStatus('saved')
-      await queryClient.invalidateQueries({
-        queryKey: ['project_lines', activeVersion?.id],
+    const currentMap = new Map(linesRef.current.map((l) => [l.id, l]))
+    const payload = ids.flatMap((id) => {
+      const line = currentMap.get(id)
+      if (!line) return [] // deleted meanwhile
+      return [
+        {
+          id: line.id,
+          sku: line.sku,
+          description: line.description,
+          qty_per_door: line.qty_per_door,
+          unit_price: line.unit_price,
+          origin: line.origin,
+          part_id: line.part_id,
+        },
+      ]
+    })
+
+    if (payload.length > 0) {
+      // One call: every line saves or none do (save_project_lines, migration 011).
+      const { error } = await supabase.rpc('save_project_lines', {
+        p_version_id: versionId,
+        p_lines: payload,
       })
-    } catch (err) {
-      setSaveStatus('error')
-      setSaveError(err instanceof Error ? err.message : 'Failed to save changes.')
+      if (error) {
+        // Put the lines back in the queue so they are retried instead of silently dropped.
+        for (const l of payload) dirtyIdsRef.current.add(l.id)
+        setSaveStatus('error')
+        setSaveError(
+          `${payload.length} change${payload.length === 1 ? '' : 's'} not saved: ${error.message}. Your edits are kept on screen — use Retry, or they will be retried on your next edit.`,
+        )
+        return
+      }
+    }
+
+    setSaveStatus(dirtyIdsRef.current.size > 0 ? 'unsaved' : 'saved')
+    if (dirtyIdsRef.current.size === 0) {
+      await queryClient.invalidateQueries({
+        queryKey: ['project_lines', versionId],
+      })
     }
   }, [activeVersion?.id, queryClient])
+
+  const flushDirtyLines = useCallback((): Promise<void> => {
+    const next = saveChainRef.current.then(runFlush)
+    saveChainRef.current = next.catch(() => undefined)
+    return next
+  }, [runFlush])
+
+  // Save everything now (cancelling the autosave delay). True when nothing is left unsaved.
+  const savePendingEdits = useCallback(async (): Promise<boolean> => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
+    await flushDirtyLines()
+    return dirtyIdsRef.current.size === 0
+  }, [flushDirtyLines])
+
+  useEffect(() => {
+    onRegisterSavePending?.(savePendingEdits)
+    return () => onRegisterSavePending?.(null)
+  }, [onRegisterSavePending, savePendingEdits])
+
+  // Warn before closing the tab while edits are still unsaved.
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (dirtyIdsRef.current.size > 0) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [])
 
   useEffect(() => {
     const dirtySet = dirtyIdsRef.current
@@ -226,8 +267,7 @@ export function ProjectGridPanel({
       else if (col === 3) {
         initial = line.unit_price === null ? '' : String(line.unit_price)
       }
-      setDraftValue(initial)
-      setEditingCell({ lineId: line.id, col })
+      setEditingCell({ lineId: line.id, col, initial })
     },
     [editable],
   )
@@ -388,28 +428,19 @@ export function ProjectGridPanel({
     if (idx === -1 || targetIdx < 0 || targetIdx >= groupLines.length) return
 
     const other = groupLines[targetIdx]
-    const tempPos = Math.max(...groupLines.map((l) => l.position)) + 1000
     setSaveStatus('saving')
     setSaveError(null)
 
     try {
-      const { error: e1 } = await supabase
-        .from('project_lines')
-        .update({ position: tempPos })
-        .eq('id', line.id)
-      if (e1) throw e1
-
-      const { error: e2 } = await supabase
-        .from('project_lines')
-        .update({ position: line.position })
-        .eq('id', other.id)
-      if (e2) throw e2
-
-      const { error: e3 } = await supabase
-        .from('project_lines')
-        .update({ position: other.position })
-        .eq('id', line.id)
-      if (e3) throw e3
+      // Swap both positions in one call (the unique position check runs at commit).
+      const { error } = await supabase.rpc('save_project_lines', {
+        p_version_id: activeVersion!.id,
+        p_lines: [
+          { id: line.id, position: other.position },
+          { id: other.id, position: line.position },
+        ],
+      })
+      if (error) throw error
 
       setLines((prev) =>
         prev.map((l) => {
@@ -421,7 +452,11 @@ export function ProjectGridPanel({
       setSaveStatus('saved')
     } catch (err) {
       setSaveStatus('error')
-      setSaveError(err instanceof Error ? err.message : 'Failed to reorder line.')
+      setSaveError(
+        err && typeof err === 'object' && 'message' in err
+          ? String((err as { message: unknown }).message)
+          : 'Failed to reorder line.',
+      )
     }
   }
 
@@ -438,6 +473,25 @@ export function ProjectGridPanel({
       setMarkupInput('15.00')
     }
   }, [activeVersion])
+
+  const handleSavePmRemark = async (groupId: string, remarks: string) => {
+    if (!pmRemarksEditable) return
+    setSaveStatus('saving')
+    setSaveError(null)
+    const { error } = await supabase.rpc('update_door_group_pm_remark', {
+      p_group_id: groupId,
+      p_remarks: remarks,
+    })
+    if (error) {
+      setSaveStatus('error')
+      setSaveError(error.message)
+      return
+    }
+    setSaveStatus('saved')
+    await queryClient.invalidateQueries({
+      queryKey: ['door_groups', activeVersion?.id],
+    })
+  }
 
   if (!activeVersion) return null
 
@@ -462,60 +516,26 @@ export function ProjectGridPanel({
     const isEditing =
       editingCell?.lineId === line.id && editingCell?.col === col
 
-    if (isEditing && col === 0) {
+    if (isEditing && editingCell) {
       return (
-        <div
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              e.preventDefault()
-              setEditingCell(null)
-              focusCell(line.id, col)
-            } else if (e.key === 'Tab') {
-              e.preventDefault()
-              commitEdit(line, col, draftValue)
-              moveFocus(line.id, col, 0, e.shiftKey ? -1 : 1)
-            }
+        <GridCellEditor
+          key={`${line.id}:${col}`}
+          initialValue={editingCell.initial}
+          isSku={col === 0}
+          parts={parts}
+          alignRight={alignRight}
+          onCommit={(value, move) => {
+            commitEdit(line, col, value)
+            if (move) moveFocus(line.id, col, move.dRow, move.dCol)
           }}
-        >
-          <SkuAutocomplete
-            value={draftValue}
-            parts={parts}
-            onChange={setDraftValue}
-            onSelectPart={(part) => {
-              handleSelectPart(line, part)
-              focusCell(line.id, col)
-            }}
-            placeholder="SKU..."
-          />
-        </div>
-      )
-    }
-
-    if (isEditing) {
-      return (
-        <Input
-          autoFocus
-          value={draftValue}
-          onChange={(e) => setDraftValue(e.target.value)}
-          onBlur={() => commitEdit(line, col, draftValue)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault()
-              commitEdit(line, col, draftValue)
-              moveFocus(line.id, col, 1, 0)
-            } else if (e.key === 'Tab') {
-              e.preventDefault()
-              commitEdit(line, col, draftValue)
-              moveFocus(line.id, col, 0, e.shiftKey ? -1 : 1)
-            } else if (e.key === 'Escape') {
-              e.preventDefault()
-              setEditingCell(null)
-              focusCell(line.id, col)
-            }
+          onCancel={() => {
+            setEditingCell(null)
+            focusCell(line.id, col)
           }}
-          className={`h-6 px-1.5 text-xs font-mono rounded-none border-neutral-950 ${
-            alignRight ? 'text-right' : ''
-          }`}
+          onSelectPart={(part) => {
+            handleSelectPart(line, part)
+            focusCell(line.id, col)
+          }}
         />
       )
     }
@@ -577,7 +597,17 @@ export function ProjectGridPanel({
           className="border border-neutral-950 bg-neutral-50 p-3 text-xs text-neutral-950 flex items-start gap-2"
         >
           <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-          <span>{saveError}</span>
+          <span className="flex-1">{saveError}</span>
+          {saveStatus === 'error' && dirtyIdsRef.current.size > 0 && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void flushDirtyLines()}
+            >
+              Retry
+            </Button>
+          )}
         </div>
       )}
 
@@ -706,6 +736,38 @@ export function ProjectGridPanel({
                   {formatCurrency(projectTotalWithMarkup)}
                 </span>
               </div>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={exporting || groups.length === 0}
+                onClick={async () => {
+                  setExporting(true)
+                  setSaveError(null)
+                  try {
+                    const { downloadProjectExcel } = await import(
+                      '@/features/projects/projectExcelExport'
+                    )
+                    await downloadProjectExcel({
+                      projectName,
+                      builderName,
+                      version: { ...activeVersion, markup_pct: markupPct },
+                      groups,
+                      lines,
+                    })
+                  } catch (err) {
+                    setSaveError(
+                      err instanceof Error ? err.message : 'Failed to export Excel.',
+                    )
+                  } finally {
+                    setExporting(false)
+                  }
+                }}
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>{exporting ? 'Exporting...' : 'Export Excel'}</span>
+              </Button>
             </div>
           </div>
 
@@ -770,11 +832,12 @@ export function ProjectGridPanel({
                 }, 0)
 
                 const doorTag =
-                  group.match_status === 'manual' &&
+                  group.door_tag ||
+                  (group.match_status === 'manual' &&
                   !group.matched_set_id &&
                   group.match_reason?.startsWith('Custom:')
                     ? group.match_reason.replace(/^Custom:\s*/, '')
-                    : ''
+                    : '')
 
                 return (
                   <GroupRowsFragment
@@ -785,6 +848,8 @@ export function ProjectGridPanel({
                     groupCost={groupCost}
                     markupFactor={markupFactor}
                     editable={editable}
+                    pmRemarksEditable={pmRemarksEditable}
+                    onSavePmRemark={(val) => void handleSavePmRemark(group.id, val)}
                     renderEditableCell={renderEditableCell}
                     onAddLine={() => void handleAddLine(group.id)}
                     onDeleteLine={(line) => void handleDeleteLine(line)}
@@ -799,204 +864,5 @@ export function ProjectGridPanel({
         </div>
       )}
     </div>
-  )
-}
-
-interface GroupRowsFragmentProps {
-  group: DoorGroup
-  doorTag: string
-  groupLines: ProjectLine[]
-  groupCost: number
-  markupFactor: number
-  editable: boolean
-  renderEditableCell: (
-    line: ProjectLine,
-    col: EditableCol,
-    display: React.ReactNode,
-    alignRight?: boolean,
-  ) => React.ReactNode
-  onAddLine: () => void
-  onDeleteLine: (line: ProjectLine) => void
-  onMoveLine: (line: ProjectLine, dir: -1 | 1) => void
-}
-
-function GroupRowsFragment({
-  group,
-  doorTag,
-  groupLines,
-  groupCost,
-  markupFactor,
-  editable,
-  renderEditableCell,
-  onAddLine,
-  onDeleteLine,
-  onMoveLine,
-}: GroupRowsFragmentProps) {
-  return (
-    <>
-      {/* Door Group Header Row (matches Excel DOOR HARDWARE SET sheet) */}
-      <tr className="bg-neutral-100 font-semibold text-neutral-950">
-        <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
-          {group.room_name}
-        </td>
-        <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap font-normal text-neutral-700">
-          {doorTag}
-        </td>
-        <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap font-mono">
-          {group.door_size || ''}
-        </td>
-        <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
-          {group.classification || ''}
-        </td>
-        <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
-          {group.leaf || ''}
-        </td>
-        <td className="border border-neutral-300 px-2 py-1" />
-        <td className="border border-neutral-300 px-2 py-1" />
-        <td className="border border-neutral-300 px-2 py-1 text-right font-mono bg-neutral-200/70 whitespace-nowrap">
-          DOOR QTY: {group.door_qty}
-        </td>
-        <td className="border border-neutral-300 px-2 py-1" />
-        <td className="border border-neutral-300 px-2 py-1 text-right font-mono whitespace-nowrap">
-          {formatCurrency(groupCost)}
-        </td>
-        <td className="border border-neutral-300 px-2 py-1 text-right font-mono whitespace-nowrap">
-          {formatCurrency(groupCost * markupFactor)}
-        </td>
-        <td className="border border-neutral-300 px-2 py-1 text-xs text-neutral-700 whitespace-nowrap">
-          {group.pm_remarks || ''}
-        </td>
-        {editable && (
-          <td className="border border-neutral-300 px-1 py-0.5 text-center">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-6 px-1.5 text-[11px]"
-              onClick={onAddLine}
-            >
-              <Plus className="h-3 w-3" />
-              <span>Add</span>
-            </Button>
-          </td>
-        )}
-      </tr>
-
-      {/* Hardware Line Rows directly beneath */}
-      {groupLines.map((line, idx) => {
-        const lineCost =
-          line.unit_price === null
-            ? null
-            : Number(line.qty_per_door) *
-              Number(group.door_qty) *
-              Number(line.unit_price)
-
-        const isAdded = line.origin === 'added'
-        const addedBg = isAdded ? 'bg-green-100/80' : ''
-
-        return (
-          <tr key={line.id} className="bg-white">
-            <td className="border border-neutral-300 px-2 py-0.5" />
-            <td className="border border-neutral-300 px-2 py-0.5" />
-            <td className="border border-neutral-300 px-2 py-0.5" />
-            <td className="border border-neutral-300 px-2 py-0.5" />
-            <td className="border border-neutral-300 px-2 py-0.5" />
-            <td className={`border border-neutral-300 p-0 whitespace-nowrap ${addedBg}`}>
-              {renderEditableCell(
-                line,
-                0,
-                <span className="font-mono text-xs font-medium text-neutral-950 whitespace-nowrap">
-                  {line.sku || <span className="text-neutral-400">—</span>}
-                </span>,
-              )}
-            </td>
-            <td className={`border border-neutral-300 p-0 whitespace-nowrap ${addedBg}`}>
-              {renderEditableCell(
-                line,
-                1,
-                <span className="text-xs text-neutral-900 whitespace-nowrap">
-                  {line.description || <span className="text-neutral-400">—</span>}
-                </span>,
-              )}
-            </td>
-            <td className={`border border-neutral-300 p-0 whitespace-nowrap ${addedBg}`}>
-              {renderEditableCell(
-                line,
-                2,
-                <span className="font-mono text-xs">{line.qty_per_door}</span>,
-                true,
-              )}
-            </td>
-            <td className={`border border-neutral-300 p-0 whitespace-nowrap ${addedBg}`}>
-              {renderEditableCell(
-                line,
-                3,
-                line.unit_price === null ? (
-                  <span className="font-mono text-xs text-neutral-400">—</span>
-                ) : (
-                  <span className="font-mono text-xs">
-                    {formatCurrency(line.unit_price)}
-                  </span>
-                ),
-                true,
-              )}
-            </td>
-            <td className={`border border-neutral-300 px-2 py-0.5 text-right font-mono text-xs text-neutral-900 whitespace-nowrap ${addedBg}`}>
-              {lineCost === null ? (
-                <span className="text-neutral-400">—</span>
-              ) : (
-                formatCurrency(lineCost)
-              )}
-            </td>
-            <td className={`border border-neutral-300 px-2 py-0.5 text-right font-mono text-xs text-neutral-900 whitespace-nowrap ${addedBg}`}>
-              {lineCost === null ? (
-                <span className="text-neutral-400">—</span>
-              ) : (
-                formatCurrency(lineCost * markupFactor)
-              )}
-            </td>
-            <td className={`border border-neutral-300 px-2 py-0.5 text-xs text-neutral-600 whitespace-nowrap ${addedBg}`} />
-            {editable && (
-              <td className="border border-neutral-300 px-1 py-0.5 text-center">
-                <div className="inline-flex items-center gap-0.5">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-5 w-5"
-                    disabled={idx === 0}
-                    aria-label="Move line up"
-                    onClick={() => onMoveLine(line, -1)}
-                  >
-                    <ArrowUp className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-5 w-5"
-                    disabled={idx === groupLines.length - 1}
-                    aria-label="Move line down"
-                    onClick={() => onMoveLine(line, 1)}
-                  >
-                    <ArrowDown className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-5 w-5"
-                    aria-label="Delete line"
-                    onClick={() => onDeleteLine(line)}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              </td>
-            )}
-          </tr>
-        )
-      })}
-    </>
   )
 }

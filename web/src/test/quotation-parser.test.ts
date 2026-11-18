@@ -5,6 +5,7 @@ import {
   normalizeClassification,
   normalizeLeaf,
   normalizeDoorSize,
+  isExcludedValue,
 } from '@/features/projects/quotationParser';
 
 async function buildSampleWorkbook(
@@ -27,6 +28,18 @@ async function buildSampleWorkbook(
 }
 
 describe('quotationParser helpers', () => {
+  it('treats EXCLUDED / Ex. / BY OTHERS markers as out of scope', () => {
+    expect(isExcludedValue('EXCLUDED')).toBe(true);
+    expect(isExcludedValue('Ex.')).toBe(true);
+    expect(isExcludedValue('(Ex.)')).toBe(true);
+    expect(isExcludedValue('BY OTHERS')).toBe(true);
+    expect(isExcludedValue('Supplied by others')).toBe(true);
+    expect(isExcludedValue('By Other')).toBe(true);
+    expect(isExcludedValue('UNIT ENTRY')).toBe(false);
+    expect(isExcludedValue('EXIT STAIR')).toBe(false);
+    expect(isExcludedValue('OTHERS STORE')).toBe(false);
+  });
+
   it('derives FIRE RATED vs NON RATED from FRL and leaf type', () => {
     expect(normalizeClassification('-/120/30', 'FR2')).toBe('FIRE RATED');
     expect(normalizeClassification('-/60/30', 'FD')).toBe('FIRE RATED');
@@ -88,6 +101,7 @@ describe('parseQuotationWorkbook', () => {
     expect(res.excludedCount).toBe(1);
     expect(res.groups).toHaveLength(2);
     expect(res.groups[0]).toMatchObject({
+      door_tag: 'D65a',
       room_name: 'FIRE EGRESS - BASEMENT',
       classification: 'FIRE RATED',
       leaf: 'SINGLE',
@@ -95,6 +109,7 @@ describe('parseQuotationWorkbook', () => {
       door_qty: 3,
     });
     expect(res.groups[1]).toMatchObject({
+      door_tag: 'D10',
       room_name: 'BATHROOM',
       classification: 'NON RATED',
       leaf: 'CAVITY SINGLE',
@@ -113,5 +128,42 @@ describe('parseQuotationWorkbook', () => {
     await expect(parseQuotationWorkbook(buf)).rejects.toThrow(
       /Could not find a quotation Door Schedule sheet/
     );
+  });
+
+  it('separates door groups when door tags differ for the same room attributes', async () => {
+    const headers = [
+      'Door Level',
+      'Door Type',
+      'Door Apt #',
+      'Room Name',
+      'Frame Type',
+      'FRL',
+      'Leaf Type',
+      'Leaf Height',
+      'Leaf 1 Width',
+      'Leaf 2 Width',
+      'Leafs',
+      'QTY',
+    ];
+    const rows: (string | number | null)[][] = [
+      ['Level 1', 'DR-002', 'A1', 'Residential Bathroom', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 2],
+      ['Level 1', 'DR-003', 'A2', 'Residential Bathroom', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 3],
+      ['Level 2', 'DR-002', 'B1', 'Residential Bathroom', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 1],
+    ];
+
+    const buf = await buildSampleWorkbook('Quotation Test', headers, rows);
+    const res = await parseQuotationWorkbook(buf);
+
+    expect(res.groups).toHaveLength(2);
+    expect(res.groups[0]).toMatchObject({
+      door_tag: 'DR-002',
+      room_name: 'RESIDENTIAL BATHROOM',
+      door_qty: 3,
+    });
+    expect(res.groups[1]).toMatchObject({
+      door_tag: 'DR-003',
+      room_name: 'RESIDENTIAL BATHROOM',
+      door_qty: 3,
+    });
   });
 });

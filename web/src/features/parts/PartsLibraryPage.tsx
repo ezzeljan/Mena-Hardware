@@ -24,6 +24,7 @@ import {
   Search,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { fetchAllRows } from '@/lib/fetchAll'
 import { useAuth } from '@/features/auth/AuthContext'
 import {
   parseNullablePriceInput,
@@ -95,16 +96,17 @@ export function PartsLibraryPage() {
 
   const partsQuery = useQuery({
     queryKey: ['parts'],
-    queryFn: async (): Promise<Part[]> => {
-      const { data, error } = await supabase
-        .from('parts')
-        .select(
-          'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at, manufacturers(id, name, is_owner_supplied)',
-        )
-        .order('sku', { ascending: true })
-      if (error) throw error
-      return (data ?? []) as unknown as Part[]
-    },
+    queryFn: (): Promise<Part[]> =>
+      fetchAllRows<Part>((from, to) =>
+        supabase
+          .from('parts')
+          .select(
+            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at, manufacturers(id, name, is_owner_supplied)',
+          )
+          .order('sku', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, to),
+      ),
   })
 
   const priceHistoryQuery = useQuery({

@@ -1,16 +1,18 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, GitBranch, Pencil, Trash2 } from 'lucide-react'
+import { ArrowLeft, ArrowRight, FileSpreadsheet, Pencil, Trash2, Upload } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
-import { useAuth } from '@/features/auth/AuthContext'
+import { fetchAllRows } from '@/lib/fetchAll'
+import { projectDisplayName } from '@/lib/projectName'
 import { projectFormSchema, type ProjectFormValues } from '@/lib/schemas'
-import type { Profile, Project, ProjectVersion } from '@/types/database'
-import { ProjectGridPanel } from '@/features/projects/ProjectGridPanel'
-import { VersionsDiffDialog } from '@/features/projects/VersionsDiffDialog'
+import type { Profile, VersionStatus } from '@/types/database'
+import { ProjectTeamPanel } from '@/features/projects/ProjectTeamPanel'
+import { QuotationImportWizard } from '@/features/projects/QuotationImportWizard'
 import { deleteProjectWithStorage } from '@/features/projects/deleteProject'
+import { useProjectDetail } from '@/features/projects/useProjectDetail'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -24,47 +26,61 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
-interface ProjectDetail extends Project {
-  project_versions?: ProjectVersion[]
+const VERSION_STATUS_TEXT: Record<VersionStatus, string> = {
+  draft: 'Draft — being prepared by the estimators',
+  submitted: 'Waiting for PM review',
+  approved: 'Approved',
+  changes_requested: 'Changes requested by the PM',
+  superseded: 'Superseded',
 }
 
+function DetailField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="space-y-0.5">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
+        {label}
+      </div>
+      <div className="text-sm text-neutral-950">{children}</div>
+    </div>
+  )
+}
+
+/**
+ * Project overview: details, team, and a summary of the hardware schedule with
+ * a button to open it (ProjectHardwarePage). The first quotation upload also
+ * starts here.
+ */
 export function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { isAdmin, isEstimatorOrAdmin } = useAuth()
   const queryClient = useQueryClient()
+  const {
+    projectQuery,
+    project,
+    estimators,
+    isAdmin,
+    canEditContent,
+    canReview,
+    canEditInfo,
+    needsQuotation,
+    latestVersion,
+  } = useProjectDetail(id)
 
   const [editOpen, setEditOpen] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
-  const [versionsOpen, setVersionsOpen] = useState(false)
-  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
 
   const form = useForm<ProjectFormValues>({
     resolver: zodResolver(projectFormSchema),
     defaultValues: {
+      reference_no: '',
       name: '',
       client: '',
       site: '',
       status: 'active',
       assigned_pm: '',
-    },
-  })
-
-  const projectQuery = useQuery({
-    queryKey: ['project', id],
-    enabled: !!id,
-    queryFn: async (): Promise<ProjectDetail> => {
-      const { data, error } = await supabase
-        .from('projects')
-        .select(
-          'id, name, client, site, status, created_by, assigned_pm, created_at, updated_at, project_versions(id, project_id, version_no, status, upload_id, markup_pct, created_by, submitted_at, created_at, updated_at)',
-        )
-        .eq('id', id!)
-        .single()
-      if (error) throw error
-      return data as unknown as ProjectDetail
     },
   })
 
@@ -82,6 +98,38 @@ export function ProjectDetailPage() {
     },
   })
 
+  // Summary of the latest version for the Hardware Schedule card.
+  const summaryVersionId = !needsQuotation ? (latestVersion?.id ?? null) : null
+  const summaryUploadId = !needsQuotation ? (latestVersion?.upload_id ?? null) : null
+  const hardwareSummaryQuery = useQuery({
+    queryKey: ['hardware-summary', summaryVersionId, summaryUploadId],
+    enabled: !!summaryVersionId,
+    queryFn: async () => {
+      const groups = await fetchAllRows<{ door_qty: number }>((from, to) =>
+        supabase
+          .from('door_groups')
+          .select('id, door_qty')
+          .eq('version_id', summaryVersionId!)
+          .order('id', { ascending: true })
+          .range(from, to),
+      )
+      let fileName: string | null = null
+      if (summaryUploadId) {
+        const { data } = await supabase
+          .from('quotation_uploads')
+          .select('original_filename')
+          .eq('id', summaryUploadId)
+          .maybeSingle()
+        fileName = (data as { original_filename: string } | null)?.original_filename ?? null
+      }
+      return {
+        groupCount: groups.length,
+        doorCount: groups.reduce((sum, g) => sum + Number(g.door_qty), 0),
+        fileName,
+      }
+    },
+  })
+
   const updateProjectMutation = useMutation({
     mutationFn: async (values: ProjectFormValues) => {
       if (!id) return
@@ -89,6 +137,7 @@ export function ProjectDetailPage() {
       const { error } = await supabase
         .from('projects')
         .update({
+          reference_no: parsed.reference_no,
           name: parsed.name,
           client: parsed.client,
           site: parsed.site,
@@ -132,7 +181,7 @@ export function ProjectDetailPage() {
     )
   }
 
-  if (projectQuery.isError || !projectQuery.data) {
+  if (projectQuery.isError || !project) {
     return (
       <div className="space-y-4">
         <Button variant="outline" size="sm" asChild>
@@ -151,16 +200,8 @@ export function ProjectDetailPage() {
     )
   }
 
-  const project = projectQuery.data
-  const versions = [...(project.project_versions ?? [])].sort(
-    (a, b) => b.version_no - a.version_no,
-  )
-  const activeDraftVersion = versions.find((v) => v.status === 'draft') ?? null
-  const activeVersion =
-    versions.find((v) => v.id === selectedVersionId) ??
-    activeDraftVersion ??
-    versions[0] ??
-    null
+  const displayName = projectDisplayName(project)
+  const summary = hardwareSummaryQuery.data
 
   return (
     <div className="space-y-6">
@@ -173,21 +214,14 @@ export function ProjectDetailPage() {
         </Button>
 
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setVersionsOpen(true)}
-          >
-            <GitBranch className="h-3.5 w-3.5" />
-            <span>Versions &amp; Diff ({versions.length})</span>
-          </Button>
-          {isEstimatorOrAdmin && (
+          {canEditInfo && (
             <Button
               variant="outline"
               size="sm"
               onClick={() => {
                 setFormError(null)
                 form.reset({
+                  reference_no: project.reference_no ?? '',
                   name: project.name,
                   client: project.client,
                   site: project.site,
@@ -217,64 +251,118 @@ export function ProjectDetailPage() {
         </div>
       </div>
 
-      {/* Project Summary Card */}
-      <div className="border border-neutral-300 bg-neutral-50 p-5 rounded-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-bold tracking-tight text-neutral-950">
-              {project.name}
-            </h1>
-            <Badge variant={project.status === 'active' ? 'default' : 'outline'}>
-              {project.status.toUpperCase()}
-            </Badge>
-          </div>
-          <div className="text-xs text-neutral-600 mt-1.5">
-            Builder: <span className="font-medium text-neutral-900">{project.client || '—'}</span>
-            {' • '}
-            Site: <span className="font-medium text-neutral-900">{project.site || '—'}</span>
-          </div>
+      {/* Project details */}
+      <div className="border border-neutral-300 bg-neutral-50 p-5 rounded-md space-y-4">
+        <div className="flex items-center gap-2.5">
+          <h1 className="text-xl font-bold tracking-tight text-neutral-950">{displayName}</h1>
+          <Badge variant={project.status === 'active' ? 'default' : 'outline'}>
+            {project.status.toUpperCase()}
+          </Badge>
         </div>
-
-        <div className="text-left sm:text-right border-t sm:border-t-0 pt-3 sm:pt-0 border-neutral-200 flex sm:flex-col items-center sm:items-end justify-between gap-2">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
-            Active Version
-          </div>
-          {versions.length > 0 ? (
-            <select
-              aria-label="Select project version"
-              value={activeVersion?.id ?? ''}
-              onChange={(e) => setSelectedVersionId(e.target.value)}
-              className="h-8 border border-neutral-300 bg-white px-2 text-xs font-mono font-semibold text-neutral-950 focus:outline-none focus:ring-1 focus:ring-neutral-950"
-            >
-              {versions.map((v) => (
-                <option key={v.id} value={v.id}>
-                  v{v.version_no} ({v.status.replace('_', ' ').toUpperCase()})
-                </option>
-              ))}
-            </select>
-          ) : (
-            <div className="text-sm font-mono text-neutral-500">—</div>
-          )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-3">
+          <DetailField label="Reference No.">
+            <span className="font-mono font-semibold">{project.reference_no || '—'}</span>
+          </DetailField>
+          <DetailField label="Project Name">{project.name}</DetailField>
+          <DetailField label="Builder">{project.client || '—'}</DetailField>
+          <DetailField label="Site">{project.site || '—'}</DetailField>
+          <DetailField label="Status">{project.status === 'active' ? 'Active' : 'Archived'}</DetailField>
+          <DetailField label="Created">
+            {new Date(project.created_at).toLocaleDateString(undefined, {
+              day: 'numeric',
+              month: 'short',
+              year: 'numeric',
+            })}
+          </DetailField>
         </div>
       </div>
 
-      {/* Editable Project Hardware Grid (Excel-style) */}
-      <ProjectGridPanel
-        projectName={project.name}
-        builderName={project.client}
-        activeVersion={activeVersion}
-        canEdit={isEstimatorOrAdmin}
+      <ProjectTeamPanel
+        projectId={project.id}
+        assignedPmId={project.assigned_pm}
+        estimators={estimators}
+        canManage={canReview}
       />
 
-      <VersionsDiffDialog
-        open={versionsOpen}
-        onOpenChange={setVersionsOpen}
-        projectId={project.id}
-        versions={versions}
-        selectedVersionId={activeVersion?.id ?? null}
-        onSelectVersion={(vid) => setSelectedVersionId(vid)}
-        canEdit={isEstimatorOrAdmin}
-      />
+      {/* Hardware schedule */}
+      {needsQuotation ? (
+        importOpen && canEditContent ? (
+          <QuotationImportWizard
+            projectId={project.id}
+            projectName={displayName}
+            onCancel={() => setImportOpen(false)}
+            onDone={() => {
+              setImportOpen(false)
+              navigate(`/projects/${project.id}/hardware`)
+            }}
+          />
+        ) : (
+          <div className="border border-dashed border-neutral-300 bg-neutral-50 p-8 text-center space-y-3">
+            <div className="text-sm font-medium text-neutral-950">
+              No quotation imported yet
+            </div>
+            <p className="text-xs text-neutral-600">
+              {canEditContent
+                ? 'Upload the quotation .xlsx and match each door group to a standard hardware set to create version 1.'
+                : estimators.length === 0
+                  ? 'Waiting for the PM to assign an estimator.'
+                  : 'Waiting for the assigned estimator to upload the quotation and do the matching.'}
+            </p>
+            {canEditContent && (
+              <Button size="sm" onClick={() => setImportOpen(true)}>
+                <Upload className="h-3.5 w-3.5" />
+                <span>Upload Quotation</span>
+              </Button>
+            )}
+          </div>
+        )
+      ) : (
+        latestVersion && (
+          <div className="border border-neutral-300 bg-white p-5 rounded-md flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                <span>Hardware Schedule</span>
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <span className="font-mono font-semibold text-neutral-950">
+                  v{latestVersion.version_no}
+                </span>
+                <Badge
+                  variant={latestVersion.status === 'approved' ? 'default' : 'outline'}
+                  className="uppercase tracking-wider text-[10px]"
+                >
+                  {latestVersion.status.replace('_', ' ')}
+                </Badge>
+                <span className="text-neutral-700">{VERSION_STATUS_TEXT[latestVersion.status]}</span>
+              </div>
+              <div className="text-xs text-neutral-600">
+                {summary
+                  ? `${summary.groupCount} door group${summary.groupCount === 1 ? '' : 's'} · ${summary.doorCount} door${summary.doorCount === 1 ? '' : 's'}`
+                  : 'Loading summary...'}
+                {' · '}
+                Updated{' '}
+                {new Date(latestVersion.updated_at).toLocaleDateString(undefined, {
+                  day: 'numeric',
+                  month: 'short',
+                  year: 'numeric',
+                })}
+              </div>
+              {summary?.fileName && (
+                <div className="text-xs text-neutral-600">
+                  Quotation file: <span className="font-medium text-neutral-900">{summary.fileName}</span>
+                </div>
+              )}
+            </div>
+            <Button asChild>
+              <Link to={`/projects/${project.id}/hardware`}>
+                <span>Open Hardware Schedule</span>
+                <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+            </Button>
+          </div>
+        )
+      )}
 
       {/* Edit Project Modal */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
@@ -282,7 +370,9 @@ export function ProjectDetailPage() {
           <DialogHeader>
             <DialogTitle>Edit Project Info</DialogTitle>
             <DialogDescription>
-              Update project details, status, or assigned PM.
+              {isAdmin
+                ? 'Update project details, status, or assigned PM.'
+                : 'Update project details or status.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -300,6 +390,16 @@ export function ProjectDetailPage() {
             className="space-y-4"
             noValidate
           >
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-project-ref">Reference No.</Label>
+              <Input id="edit-project-ref" placeholder="e.g. SV002" {...form.register('reference_no')} />
+              {form.formState.errors.reference_no && (
+                <p className="text-xs font-medium text-neutral-900">
+                  {form.formState.errors.reference_no.message}
+                </p>
+              )}
+            </div>
+
             <div className="space-y-1.5">
               <Label htmlFor="edit-project-name">Project Name</Label>
               <Input id="edit-project-name" {...form.register('name')} />
@@ -384,7 +484,7 @@ export function ProjectDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete Project</DialogTitle>
             <DialogDescription>
-              Permanently delete <strong>{project.name}</strong> and all of its versions, uploaded quotations, door groups, and hardware lines? This cannot be undone.
+              Permanently delete <strong>{displayName}</strong> and all of its versions, uploaded quotations, door groups, and hardware lines? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
 

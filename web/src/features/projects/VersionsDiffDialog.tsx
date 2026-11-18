@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CopyPlus, GitBranch, GitCompare } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { fetchVersionGroups, fetchVersionLines } from '@/features/projects/projectData'
 import { useAuth } from '@/features/auth/AuthContext'
 import { formatCurrency } from '@/lib/utils'
 import type {
@@ -11,7 +12,7 @@ import type {
   ProjectVersion,
 } from '@/types/database'
 import { computeVersionDiff } from '@/features/projects/versionDiff'
-import { createNewDraftRevision } from '@/features/projects/versionActions'
+import { canReviseFrom, createNewDraftRevision } from '@/features/projects/versionActions'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -44,31 +45,10 @@ async function fetchVersionSnapshot(versionId: string): Promise<{
   groups: DoorGroup[]
   lines: ProjectLine[]
 }> {
-  const { data: gData, error: gErr } = await supabase
-    .from('door_groups')
-    .select(
-      'id, version_id, position, group_key, room_name, classification, leaf, door_size, door_qty, matched_set_id, match_status, match_score, match_reason, pm_remarks, created_at, updated_at',
-    )
-    .eq('version_id', versionId)
-    .order('position', { ascending: true })
-  if (gErr) throw gErr
-
-  const groups = (gData ?? []) as DoorGroup[]
+  const groups = await fetchVersionGroups(versionId)
   if (groups.length === 0) return { groups: [], lines: [] }
-
-  const { data: lData, error: lErr } = await supabase
-    .from('project_lines')
-    .select(
-      'id, group_id, position, sku, description, qty_per_door, unit_price, origin, part_id, created_at, updated_at',
-    )
-    .in(
-      'group_id',
-      groups.map((g) => g.id),
-    )
-    .order('position', { ascending: true })
-  if (lErr) throw lErr
-
-  return { groups, lines: (lData ?? []) as ProjectLine[] }
+  const lines = await fetchVersionLines(versionId)
+  return { groups, lines }
 }
 
 export function VersionsDiffDialog({
@@ -141,8 +121,7 @@ export function VersionsDiffDialog({
   const createDraftMutation = useMutation({
     mutationFn: async (source: ProjectVersion) => {
       if (!user) throw new Error('Must be signed in.')
-      const maxNo = Math.max(0, ...versions.map((v) => v.version_no))
-      return createNewDraftRevision(projectId, source, maxNo + 1, user.id)
+      return createNewDraftRevision(source.id)
     },
     onSuccess: async (newVersionId) => {
       setActionError(null)
@@ -195,7 +174,7 @@ export function VersionsDiffDialog({
             </Button>
           </div>
 
-          {canEdit && !hasDraft && latestVersion && (
+          {canEdit && !hasDraft && latestVersion && canReviseFrom(latestVersion.status) && (
             <Button
               type="button"
               size="sm"

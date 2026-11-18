@@ -11,11 +11,14 @@ import {
   Users,
 } from 'lucide-react'
 
+import type { UserRole } from '@/types/database'
+
 interface SidebarProps {
   isAdmin: boolean
+  role?: UserRole
 }
 
-export function Sidebar({ isAdmin }: SidebarProps) {
+export function Sidebar({ isAdmin, role = isAdmin ? 'admin' : 'viewer' }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     return localStorage.getItem('mena_sidebar_collapsed') === 'true'
   })
@@ -117,15 +120,23 @@ export function Sidebar({ isAdmin }: SidebarProps) {
       >
         {collapsed ? (
           <div className="font-mono text-[10px] font-bold uppercase text-neutral-800">
-            {isAdmin ? 'ADM' : 'RO'}
+            {role === 'admin'
+              ? 'ADM'
+              : role === 'estimator'
+                ? 'HW'
+                : role === 'pm'
+                  ? 'PM'
+                  : 'RO'}
           </div>
         ) : (
           <>
             <div className="font-semibold text-neutral-800">Access Mode</div>
             <div className="mt-0.5">
-              {isAdmin
-                ? 'Full administrative read/write access'
-                : 'Read-only library & sets access'}
+              {role === 'admin' && 'Full administrative read/write access'}
+              {role === 'estimator' &&
+                'Hardware Team: create & edit draft projects'}
+              {role === 'pm' && 'PM: review, remarks & project approvals'}
+              {role === 'viewer' && 'Read-only access'}
             </div>
           </>
         )}

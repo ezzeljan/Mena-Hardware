@@ -5,7 +5,7 @@ import { ChevronRight, FolderKanban, Plus, Search, Trash2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/features/auth/AuthContext'
 import type { Profile, Project, ProjectVersion } from '@/types/database'
-import { CreateProjectWizard } from '@/features/projects/CreateProjectWizard'
+import { CreateProjectForm } from '@/features/projects/CreateProjectWizard'
 import { deleteProjectWithStorage } from '@/features/projects/deleteProject'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -18,6 +18,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { projectDisplayName } from '@/lib/projectName'
 import {
   Table,
   TableBody,
@@ -32,7 +33,7 @@ interface ProjectRow extends Project {
 }
 
 export function ProjectsPage() {
-  const { isAdmin, isEstimatorOrAdmin } = useAuth()
+  const { isAdmin, isPmOrAdmin, role } = useAuth()
   const queryClient = useQueryClient()
 
   const [searchQuery, setSearchQuery] = useState('')
@@ -47,7 +48,7 @@ export function ProjectsPage() {
       const { data, error } = await supabase
         .from('projects')
         .select(
-          'id, name, client, site, status, created_by, assigned_pm, created_at, updated_at, project_versions(id, version_no, status)',
+          'id, reference_no, name, client, site, status, created_by, assigned_pm, created_at, updated_at, project_versions(id, version_no, status)',
         )
         .order('updated_at', { ascending: false })
       if (error) throw error
@@ -55,17 +56,20 @@ export function ProjectsPage() {
     },
   })
 
+  // profile_directory (id, full_name, role) is readable by every signed-in user,
+  // unlike profiles (self/admin only). Admins pick a PM when creating a project;
+  // a PM who creates a project is assigned to it automatically.
   const pmProfilesQuery = useQuery({
-    queryKey: ['profiles', 'pms'],
+    queryKey: ['profile_directory', 'pms'],
     enabled: isAdmin,
-    queryFn: async (): Promise<Pick<Profile, 'id' | 'full_name' | 'email' | 'role'>[]> => {
+    queryFn: async (): Promise<Pick<Profile, 'id' | 'full_name' | 'role'>[]> => {
       const { data, error } = await supabase
-        .from('profiles')
-        .select('id, full_name, email, role')
+        .from('profile_directory')
+        .select('id, full_name, role')
         .in('role', ['pm', 'admin'])
         .order('full_name', { ascending: true })
       if (error) throw error
-      return (data ?? []) as Pick<Profile, 'id' | 'full_name' | 'email' | 'role'>[]
+      return (data ?? []) as Pick<Profile, 'id' | 'full_name' | 'role'>[]
     },
   })
 
@@ -89,6 +93,7 @@ export function ProjectsPage() {
       if (statusFilter !== 'ALL' && p.status !== statusFilter) return false
       if (!q) return true
       return (
+        p.reference_no.toLowerCase().includes(q) ||
         p.name.toLowerCase().includes(q) ||
         p.client.toLowerCase().includes(q) ||
         p.site.toLowerCase().includes(q)
@@ -115,7 +120,7 @@ export function ProjectsPage() {
           </p>
         </div>
 
-        {isEstimatorOrAdmin && !wizardOpen && (
+        {isPmOrAdmin && !wizardOpen && (
           <Button size="sm" onClick={() => setWizardOpen(true)}>
             <Plus className="h-4 w-4" />
             <span>New Project</span>
@@ -124,7 +129,7 @@ export function ProjectsPage() {
       </div>
 
       {wizardOpen ? (
-        <CreateProjectWizard
+        <CreateProjectForm
           pmProfiles={pmProfilesQuery.data ?? []}
           onCancel={() => setWizardOpen(false)}
         />
@@ -137,7 +142,7 @@ export function ProjectsPage() {
             <Search className="h-4 w-4 absolute left-3 top-2.5 text-neutral-400" />
             <Input
               aria-label="Search projects"
-              placeholder="Search project name, builder, or site..."
+              placeholder="Search Ref No., project name, builder, or site..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9 bg-white"
@@ -178,14 +183,17 @@ export function ProjectsPage() {
       ) : filteredProjects.length === 0 ? (
         <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
           No projects found.{' '}
-          {isEstimatorOrAdmin
+          {isPmOrAdmin
             ? 'Click "New Project" to create one.'
-            : 'Ask an estimator or administrator to create a project.'}
+            : role === 'estimator'
+              ? 'You will see projects here once a PM assigns you to them.'
+              : 'Ask a PM or administrator to create a project.'}
         </div>
       ) : (
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead>Ref No.</TableHead>
               <TableHead>Project Name</TableHead>
               <TableHead>Builder</TableHead>
               <TableHead>Site</TableHead>
@@ -203,6 +211,9 @@ export function ProjectsPage() {
                   key={project.id}
                   className={project.status === 'archived' ? 'opacity-60' : undefined}
                 >
+                  <TableCell className="font-mono text-xs font-semibold text-neutral-950 whitespace-nowrap">
+                    {project.reference_no || '—'}
+                  </TableCell>
                   <TableCell className="font-semibold text-neutral-950">
                     <Link to={`/projects/${project.id}`} className="hover:underline">
                       {project.name}
@@ -287,7 +298,7 @@ export function ProjectsPage() {
           <DialogHeader>
             <DialogTitle>Delete Project</DialogTitle>
             <DialogDescription>
-              Permanently delete <strong>{deleteTarget?.name}</strong> and all of its versions, uploaded quotations, door groups, and hardware lines? This cannot be undone.
+              Permanently delete <strong>{deleteTarget ? projectDisplayName(deleteTarget) : ''}</strong> and all of its versions, uploaded quotations, door groups, and hardware lines? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
 

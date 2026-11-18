@@ -1,6 +1,6 @@
 export type UserRole = 'admin' | 'estimator' | 'pm' | 'viewer'
 
-export type LeafType = 'SINGLE' | 'DOUBLE' | 'CAVITY SINGLE' | ''
+export type LeafType = 'SINGLE' | 'DOUBLE' | 'CAVITY SINGLE' | 'CAVITY DOUBLE' | 'TRIPLE' | ''
 
 export interface Profile {
   id: string
@@ -62,6 +62,17 @@ export interface StandardSetLine {
   updated_at: string
 }
 
+/** Row of the profile_directory view: non-sensitive profile columns readable by any signed-in user. */
+export type DirectoryProfile = Pick<Profile, 'id' | 'full_name' | 'role'>
+
+/** An estimator assigned to a project by its PM (or an admin). */
+export interface ProjectEstimator {
+  project_id: string
+  estimator_id: string
+  assigned_by: string | null
+  created_at: string
+}
+
 export type ProjectStatus = 'active' | 'archived'
 export type VersionStatus =
   | 'draft'
@@ -75,6 +86,8 @@ export type ApprovalAction = 'submit' | 'approve' | 'reject'
 
 export interface Project {
   id: string
+  /** Reference No. (e.g. "SV002"); '' when none. */
+  reference_no: string
   name: string
   client: string
   site: string
@@ -126,6 +139,7 @@ export interface DoorGroup {
   version_id: string
   position: number
   group_key: string
+  door_tag: string
   room_name: string
   classification: string
   leaf: string

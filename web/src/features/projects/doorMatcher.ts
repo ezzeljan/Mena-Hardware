@@ -15,7 +15,8 @@ export interface GroupMatchResult {
   topCandidates: MatchCandidate[];
 }
 
-const AUTO_MATCH_THRESHOLD = 0.72;
+/** Auto matches scoring below this need individual review (not bulk-confirmable). */
+export const AUTO_MATCH_THRESHOLD = 0.72;
 
 const ABBREVIATION_MAP: Record<string, string> = {
   CBD: 'CUPBOARD',
