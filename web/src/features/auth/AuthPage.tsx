@@ -38,7 +38,7 @@ export function AuthPage() {
   })
 
   if (!loading && session) {
-    return <Navigate to="/parts" replace />
+    return <Navigate to="/dashboard" replace />
   }
 
   async function onLoginSubmit(values: LoginFormValues) {
@@ -54,7 +54,7 @@ export function AuthPage() {
         setServerError(error.message)
         return
       }
-      navigate('/parts', { replace: true })
+      navigate('/dashboard', { replace: true })
     } finally {
       setSubmitting(false)
     }
@@ -77,7 +77,7 @@ export function AuthPage() {
         return
       }
       if (data.session) {
-        navigate('/parts', { replace: true })
+        navigate('/dashboard', { replace: true })
       } else {
         setInfoMessage(
           'Account created with default role "viewer". If email confirmation is enabled, check your inbox before signing in.',
