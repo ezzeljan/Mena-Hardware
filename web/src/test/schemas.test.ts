@@ -4,6 +4,7 @@ import {
   nullablePriceSchema,
   parseNullablePriceInput,
   partFormSchema,
+  projectFormSchema,
   standardSetLineSchema,
   standardSetSchema,
 } from '@/lib/schemas'
@@ -71,5 +72,40 @@ describe('Shared Zod Schemas & Price Parsing', () => {
     expect(formatCurrency(null)).toBe('—')
     expect(formatCurrency(undefined)).toBe('—')
     expect(formatCurrency(54)).toContain('54.00')
+  })
+
+  it('validates project form schema', () => {
+    const valid = projectFormSchema.safeParse({
+      reference_no: 'SV002',
+      name: 'Harborview Apartments',
+      client: 'Mena Contractors',
+      site: 'Sydney CBD',
+      status: 'active',
+      stage: 'tender',
+      assigned_pm: '',
+    })
+    expect(valid.success).toBe(true)
+
+    const badStage = projectFormSchema.safeParse({
+      reference_no: '',
+      name: 'Harborview Apartments',
+      client: '',
+      site: '',
+      status: 'active',
+      stage: 'lost',
+      assigned_pm: '',
+    })
+    expect(badStage.success).toBe(false)
+
+    const missingName = projectFormSchema.safeParse({
+      reference_no: '',
+      name: '   ',
+      client: '',
+      site: '',
+      status: 'active',
+      stage: 'tender',
+      assigned_pm: '',
+    })
+    expect(missingName.success).toBe(false)
   })
 })

@@ -212,6 +212,8 @@ export function StandardSetsPage() {
             <option value="SINGLE">SINGLE</option>
             <option value="DOUBLE">DOUBLE</option>
             <option value="CAVITY SINGLE">CAVITY SINGLE</option>
+            <option value="CAVITY DOUBLE">CAVITY DOUBLE</option>
+            <option value="TRIPLE">TRIPLE</option>
             <option value="EMPTY">Unspecified / Pivot</option>
           </select>
 
@@ -264,6 +266,9 @@ export function StandardSetsPage() {
           <TableBody>
             {filteredSets.map((set) => {
               const lines = set.standard_set_lines ?? []
+              const unpricedCount = lines.filter(
+                (l) => l.unit_price === null || l.unit_price === undefined,
+              ).length
               const totalCost = lines.reduce((acc, l) => {
                 if (l.unit_price === null || l.unit_price === undefined) {
                   return acc
@@ -309,7 +314,12 @@ export function StandardSetsPage() {
                     {lines.length} items
                   </TableCell>
                   <TableCell className="font-mono text-sm font-medium">
-                    {formatCurrency(totalCost)}
+                    <div>{formatCurrency(totalCost)}</div>
+                    {unpricedCount > 0 && (
+                      <div className="text-[10px] text-neutral-500">
+                        + {unpricedCount} unpriced
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell>
                     {set.active ? (
@@ -398,6 +408,8 @@ export function StandardSetsPage() {
                   <option value="SINGLE">SINGLE</option>
                   <option value="DOUBLE">DOUBLE</option>
                   <option value="CAVITY SINGLE">CAVITY SINGLE</option>
+                  <option value="CAVITY DOUBLE">CAVITY DOUBLE</option>
+                  <option value="TRIPLE">TRIPLE</option>
                   <option value="">Empty / Pivot</option>
                 </select>
               </div>

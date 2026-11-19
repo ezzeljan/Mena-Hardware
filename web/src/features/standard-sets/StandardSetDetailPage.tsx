@@ -13,6 +13,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { fetchAllRows } from '@/lib/fetchAll'
 import { useAuth } from '@/features/auth/AuthContext'
 import {
   parseNullablePriceInput,
@@ -93,17 +94,18 @@ export function StandardSetDetailPage() {
   })
 
   const partsQuery = useQuery({
-    queryKey: ['parts'],
-    queryFn: async (): Promise<Part[]> => {
-      const { data, error } = await supabase
-        .from('parts')
-        .select(
-          'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
-        )
-        .order('sku', { ascending: true })
-      if (error) throw error
-      return (data ?? []) as Part[]
-    },
+    queryKey: ['parts', 'autocomplete'],
+    queryFn: (): Promise<Part[]> =>
+      fetchAllRows<Part>((from, to) =>
+        supabase
+          .from('parts')
+          .select(
+            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
+          )
+          .order('sku', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, to),
+      ),
   })
 
   const sortedLines = useMemo(() => {
@@ -211,25 +213,11 @@ export function StandardSetDetailPage() {
       lineA: StandardSetLine
       lineB: StandardSetLine
     }) => {
-      // Use a temporary position offset to avoid unique(set_id, position) collision over HTTP
-      const tempPos = 999999
-      const { error: err1 } = await supabase
-        .from('standard_set_lines')
-        .update({ position: tempPos })
-        .eq('id', lineA.id)
-      if (err1) throw err1
-
-      const { error: err2 } = await supabase
-        .from('standard_set_lines')
-        .update({ position: lineA.position })
-        .eq('id', lineB.id)
-      if (err2) throw err2
-
-      const { error: err3 } = await supabase
-        .from('standard_set_lines')
-        .update({ position: lineB.position })
-        .eq('id', lineA.id)
-      if (err3) throw err3
+      const { error } = await supabase.rpc('swap_standard_set_lines', {
+        p_line_a: lineA.id,
+        p_line_b: lineB.id,
+      })
+      if (error) throw error
     },
     onSuccess: async () => {
       setActionError(null)
@@ -268,6 +256,9 @@ export function StandardSetDetailPage() {
   }
 
   const set = setQuery.data
+  const unpricedCount = sortedLines.filter(
+    (line) => line.unit_price === null || line.unit_price === undefined,
+  ).length
   const totalSetCost = sortedLines.reduce((acc, line) => {
     if (line.unit_price === null || line.unit_price === undefined) return acc
     return acc + Number(line.qty) * Number(line.unit_price)
@@ -361,6 +352,11 @@ export function StandardSetDetailPage() {
           <div className="text-xl font-bold font-mono text-neutral-950">
             {formatCurrency(totalSetCost)}
           </div>
+          {unpricedCount > 0 && (
+            <div className="text-[11px] font-medium text-neutral-600 mt-0.5">
+              + {unpricedCount} unpriced item{unpricedCount === 1 ? '' : 's'}
+            </div>
+          )}
         </div>
       </div>
 
@@ -549,6 +545,8 @@ export function StandardSetDetailPage() {
                   <option value="SINGLE">SINGLE</option>
                   <option value="DOUBLE">DOUBLE</option>
                   <option value="CAVITY SINGLE">CAVITY SINGLE</option>
+                  <option value="CAVITY DOUBLE">CAVITY DOUBLE</option>
+                  <option value="TRIPLE">TRIPLE</option>
                   <option value="">Empty / Pivot</option>
                 </select>
               </div>
