@@ -24,6 +24,10 @@ const UPLOAD_ID = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 const SET_FIRE_ID = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
 const SET_BATH_ID = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
 const SUPPLIER_ID = '44444444-cccc-cccc-cccc-444444444444'
+const SUPPLIER2_ID = '44444444-dddd-dddd-dddd-444444444444'
+const QUOTE_ID = 'ffffffff-1111-1111-1111-ffffffffffff'
+const QUOTE2_ID = 'ffffffff-2222-2222-2222-ffffffffffff'
+const BUILDER = 'Mena Builders'
 const TS = '2026-11-18T00:00:00Z'
 const PROJECT_NAME = 'SV999 — E2E Test Tower'
 
@@ -132,7 +136,13 @@ const standardSets = [
 ]
 
 const supplier = { id: SUPPLIER_ID, name: 'MM', is_owner_supplied: true }
+const supplier2 = { id: SUPPLIER2_ID, name: 'NOVAS', is_owner_supplied: false }
 const partsList = [
+  {
+    id: '55555555-5555-5555-5555-555555555553', sku: 'NV-HINGE', supplier_id: SUPPLIER2_ID,
+    description: 'NOVAS HINGE SSS', unit_cost: 6, active: true,
+    created_at: TS, updated_at: TS, suppliers: supplier2,
+  },
   {
     id: '55555555-5555-5555-5555-555555555551', sku: 'MMHINGE', supplier_id: SUPPLIER_ID,
     description: 'HINGES 100X100 4BB BLACK', unit_cost: 4, active: true,
@@ -147,6 +157,8 @@ const partsList = [
 
 interface MockState {
   project: Row | null
+  quotes: Row[]
+  sheets: Row[]
   versions: Row[]
   estimators: Row[]
   doorGroups: Row[]
@@ -157,7 +169,48 @@ interface MockState {
   comments: Row[]
   lastProfileUpdate?: Row
   lastProjectUpdate?: Row
-  lastReimport?: { p_groups: Array<Row & { lines: Row[] }> }
+  lastReimport?: { p_quote_id: string; p_groups: Array<Row & { lines: Row[] }> }
+  lastImport?: Row
+}
+
+/** The sheet of a version for its first supplier (seeded versions get one). */
+const sheetIdFor = (versionId: unknown) => `sheet-${String(versionId)}`
+
+/**
+ * Seeds written in the old shape (versions without a quote, lines without a
+ * sheet) get the default quote for BUILDER and one MM sheet per version.
+ */
+function normalizeSeed(state: MockState) {
+  for (const v of state.versions) {
+    v.quote_id ??= QUOTE_ID
+    if (!state.sheets.some((s) => s.version_id === v.id)) {
+      state.sheets.push({
+        id: sheetIdFor(v.id), version_id: v.id, supplier_id: SUPPLIER_ID, name: 'MM', position: 0,
+        created_at: TS, updated_at: TS,
+      })
+    }
+  }
+  for (const quoteId of new Set(state.versions.map((v) => String(v.quote_id)))) {
+    if (!state.quotes.some((q) => q.id === quoteId)) {
+      state.quotes.push({
+        id: quoteId, project_id: PROJECT_ID, builder_name: BUILDER, created_by: PM_ID,
+        created_at: TS, updated_at: TS,
+      })
+    }
+  }
+  for (const l of state.lines) {
+    if (l.sheet_id) continue
+    const g = state.doorGroups.find((x) => x.id === l.group_id)
+    l.sheet_id = sheetIdFor(g?.version_id ?? VERSION_ID)
+  }
+}
+
+/** "version_id=eq.X" / "version_id=in.(X,Y)" from a PostgREST URL. */
+function idsFilter(url: string, column: string): string[] | null {
+  const eq = url.match(new RegExp(`${column}=eq\\.([^&]+)`))
+  if (eq) return [eq[1]]
+  const inList = url.match(new RegExp(`${column}=in\\.\\(([^)]*)\\)`))
+  return inList ? inList[1].split(',').map((s) => s.replace(/"/g, '')) : null
 }
 
 const json = (route: Route, body: unknown, status = 200) =>
@@ -174,6 +227,8 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
   const me = { ...USERS[role] }
   const state: MockState = {
     project: null,
+    quotes: [],
+    sheets: [],
     versions: [],
     estimators: [],
     doorGroups: [],
@@ -184,6 +239,7 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
     comments: [],
     ...seed,
   }
+  normalizeSeed(state)
 
   const authUser = { id: me.id, aud: 'authenticated', role: 'authenticated', email: me.email }
 
@@ -240,8 +296,42 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
     return json(route, state.comments)
   })
   await page.route('**/rest/v1/suppliers**', (route) =>
-    json(route, [{ ...supplier, created_at: TS, updated_at: TS }]),
+    json(route, [supplier, supplier2].map((s) => ({ ...s, created_at: TS, updated_at: TS }))),
   )
+
+  await page.route('**/rest/v1/hardware_quotes**', async (route) => {
+    const method = route.request().method()
+    const url = decodeURIComponent(route.request().url())
+    if (method === 'PATCH') {
+      const id = idsFilter(url, 'id')?.[0]
+      const q = state.quotes.find((x) => x.id === id)
+      if (q) Object.assign(q, route.request().postDataJSON() as Row)
+      return json(route, q ? [{ id: q.id }] : [])
+    }
+    return json(route, state.quotes)
+  })
+
+  await page.route('**/rest/v1/quote_sheets**', async (route) => {
+    const method = route.request().method()
+    const url = decodeURIComponent(route.request().url())
+    if (method === 'PATCH') {
+      const id = idsFilter(url, 'id')?.[0]
+      const s = state.sheets.find((x) => x.id === id)
+      if (s) Object.assign(s, route.request().postDataJSON() as Row)
+      return json(route, s ? [{ id: s.id }] : [])
+    }
+    if (method === 'DELETE') {
+      const id = idsFilter(url, 'id')?.[0]
+      state.sheets = state.sheets.filter((s) => s.id !== id)
+      state.lines = state.lines.filter((l) => l.sheet_id !== id)
+      return json(route, [{ id }])
+    }
+    const versionIds = idsFilter(url, 'version_id')
+    const rows = state.sheets
+      .filter((s) => !versionIds || versionIds.includes(String(s.version_id)))
+      .sort((a, b) => Number(a.position) - Number(b.position))
+    return json(route, rows)
+  })
   await page.route('**/rest/v1/parts**', (route) => json(route, partsList))
   await page.route('**/rest/v1/standard_sets**', (route) => json(route, standardSets))
   await page.route('**/storage/v1/object/quotations/**', (route) =>
@@ -271,7 +361,10 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
     if (method === 'GET') {
       if (!state.project) return json(route, [])
       const full = {
+        awarded_quote_id: null,
+        awarded_supplier_id: null,
         ...state.project,
+        hardware_quotes: state.quotes,
         project_versions: state.versions,
         project_estimators: state.estimators,
       }
@@ -324,7 +417,14 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
       if (payload.status === 'submitted') v.submitted_at = '2026-11-18T01:00:00Z'
       return json(route, wantsSingle(route) ? v : [v])
     }
-    return json(route, state.versions)
+    // With their sheets embedded (the award dialog asks for quote_sheets(...)).
+    return json(
+      route,
+      state.versions.map((v) => ({
+        ...v,
+        quote_sheets: state.sheets.filter((s) => s.version_id === v.id),
+      })),
+    )
   })
 
   await page.route('**/rest/v1/quotation_uploads**', (route) =>
@@ -374,11 +474,27 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
 
   // Database functions (migration 011)
   await page.route('**/rest/v1/rpc/import_quotation', async (route) => {
-    const body = route.request().postDataJSON() as { p_groups: Array<Row & { lines: Row[] }> }
+    const body = route.request().postDataJSON() as Row & { p_groups: Array<Row & { lines: Row[] }> }
+    state.lastImport = body
+    // Mirrors import_quotation (migration 021): new quote + v1 + its first sheet.
+    state.quotes = [
+      {
+        id: QUOTE_ID, project_id: PROJECT_ID, builder_name: body.p_builder_name, created_by: me.id,
+        created_at: TS, updated_at: TS,
+      },
+    ]
+    const sup = [supplier, supplier2].find((s) => s.id === body.p_supplier_id)!
+    state.sheets = [
+      {
+        id: sheetIdFor(VERSION_ID), version_id: VERSION_ID, supplier_id: sup.id, name: sup.name,
+        position: 0, created_at: TS, updated_at: TS,
+      },
+    ]
     state.versions = [
       {
         id: VERSION_ID,
         project_id: PROJECT_ID,
+        quote_id: QUOTE_ID,
         version_no: 1,
         status: 'draft',
         upload_id: UPLOAD_ID,
@@ -406,6 +522,7 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
         state.lines.push({
           id: `pline-${gi + 1}-${li + 1}`,
           group_id: groupId,
+          sheet_id: sheetIdFor(VERSION_ID),
           ...l,
           created_at: TS,
           updated_at: TS,
@@ -423,12 +540,22 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
   })
 
   await page.route('**/rest/v1/rpc/reimport_quotation', async (route) => {
-    const body = route.request().postDataJSON() as { p_groups: Array<Row & { lines: Row[] }> }
+    const body = route.request().postDataJSON() as {
+      p_quote_id: string
+      p_groups: Array<Row & { lines: Row[] }>
+    }
     state.lastReimport = body
+    // Mirrors reimport_quotation (migration 021): the new version gets the same
+    // sheets; kept groups keep every sheet's lines, new groups get theirs on every sheet.
+    const oldLines = state.lines
+    const oldSheets = state.sheets.filter((s) => s.version_id !== VERSION2_ID)
     for (const v of state.versions) if (v.status !== 'draft') v.status = 'superseded'
+    const newSheets = oldSheets.map((s) => ({ ...s, id: `${s.id}-v2`, version_id: VERSION2_ID }))
+    state.sheets = [...oldSheets, ...newSheets]
     state.versions.push({
       id: VERSION2_ID,
       project_id: PROJECT_ID,
+      quote_id: body.p_quote_id,
       version_no: 2,
       status: 'draft',
       upload_id: UPLOAD_ID,
@@ -443,11 +570,41 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
     body.p_groups.forEach(({ lines, ...g }, gi) => {
       const groupId = `group-v2-${gi + 1}`
       state.doorGroups.push({ id: groupId, version_id: VERSION2_ID, ...g, created_at: TS, updated_at: TS })
-      lines.forEach((l, li) =>
-        state.lines.push({ id: `pline-v2-${gi + 1}-${li + 1}`, group_id: groupId, ...l, created_at: TS, updated_at: TS }),
-      )
+      for (const sheet of newSheets) {
+        const oldSheetId = String(sheet.id).replace(/-v2$/, '')
+        const source = g.carried_from_group_id
+          ? oldLines.filter((l) => l.group_id === g.carried_from_group_id && l.sheet_id === oldSheetId)
+          : lines
+        source.forEach((l, li) =>
+          state.lines.push({
+            ...l,
+            id: `pline-v2-${gi + 1}-${sheet.id}-${li + 1}`,
+            group_id: groupId,
+            sheet_id: sheet.id,
+            created_at: TS,
+            updated_at: TS,
+          }),
+        )
+      }
     })
     return json(route, VERSION2_ID)
+  })
+
+  await page.route('**/rest/v1/rpc/add_quote_sheet', async (route) => {
+    const body = route.request().postDataJSON() as Row
+    const versionSheets = state.sheets.filter((s) => s.version_id === body.p_version_id)
+    const sup = [supplier, supplier2].find((s) => s.id === body.p_supplier_id)!
+    const id = `sheet-added-${state.sheets.length + 1}`
+    state.sheets.push({
+      id, version_id: body.p_version_id, supplier_id: sup.id, name: body.p_name || sup.name,
+      position: versionSheets.length, created_at: TS, updated_at: TS,
+    })
+    const sourceId = body.p_source_sheet_id ?? versionSheets[0]?.id
+    const copies = state.lines
+      .filter((l) => l.sheet_id === sourceId)
+      .map((l, i) => ({ ...l, id: `${id}-line-${i + 1}`, sheet_id: id }))
+    state.lines.push(...copies)
+    return json(route, id)
   })
 
   await page.route('**/rest/v1/rpc/transition_version', async (route) => {
@@ -520,7 +677,7 @@ async function signIn(page: Page, role: Role) {
 }
 
 async function createProjectViaForm(page: Page) {
-  await page.getByRole('link', { name: 'Projects' }).click()
+  await page.getByRole('link', { name: 'Projects', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible()
   await page.getByRole('button', { name: 'New Project' }).click()
 
@@ -533,11 +690,20 @@ async function createProjectViaForm(page: Page) {
   await page.getByRole('button', { name: 'Create Project' }).click()
 
   await expect(page.getByRole('heading', { name: PROJECT_NAME })).toBeVisible()
-  await expect(page.getByText('No quotation imported yet')).toBeVisible()
+  await expect(page.getByText('No builder quotes yet.')).toBeVisible()
 }
 
+/** New Quote: builder and first supplier sheet, then the import wizard. */
 async function importQuotation(page: Page) {
-  await page.getByRole('button', { name: 'Upload Quotation' }).click()
+  await page.getByRole('button', { name: 'New Quote' }).click()
+  const dialog = page.getByRole('dialog', { name: 'New Hardware Quote' })
+  // Both are required before the upload.
+  await dialog.getByRole('button', { name: 'Continue to upload' }).click()
+  await expect(dialog.getByText('Enter the builder this quote is for.')).toBeVisible()
+  await dialog.getByLabel('Builder').fill(BUILDER)
+  await dialog.getByLabel('First supplier sheet').selectOption({ label: 'MM' })
+  await dialog.getByRole('button', { name: 'Continue to upload' }).click()
+  await expect(page.getByText(`Upload ${BUILDER}'s quotation`)).toBeVisible()
 
   // Step 1: upload
   await page.locator('input[type="file"]').setInputFiles({
@@ -559,10 +725,11 @@ async function importQuotation(page: Page) {
   // Step 3: summary
   await page.getByRole('button', { name: 'Create Version 1' }).click()
 
-  // Creating version 1 opens the hardware page
-  await expect(page).toHaveURL(/\/projects\/[^/]+\/hardware$/)
-  await expect(page.getByText('No quotation imported yet')).toHaveCount(0)
+  // Creating version 1 opens the quote, on its first supplier sheet.
+  await expect(page).toHaveURL(new RegExp(`/projects/[^/]+/hardware\\?quote=${QUOTE_ID}$`))
+  await expect(page.getByText(`Quote for ${BUILDER}`)).toBeVisible()
   await expect(page.getByText('505BC+SLC')).toBeVisible()
+  await expect(page.getByTestId('sheet-tab')).toHaveText(['MM'])
 }
 
 async function submitForApproval(page: Page) {
@@ -603,11 +770,11 @@ test('PM creates a project (auto-assigned), cannot import, assigns an estimator'
   expect(state.project?.assigned_pm).toBe(PM_ID)
   expect(state.project?.reference_no).toBe('SV999')
   expect(state.project?.name).toBe('E2E Test Tower')
-  await expect(page.getByText('SV999', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: PROJECT_NAME })).toBeVisible()
   await expect(page.getByText('Pat PM').first()).toBeVisible()
 
-  // The PM can't upload the quotation; the page says it's waiting on an estimator.
-  await expect(page.getByRole('button', { name: 'Upload Quotation' })).toHaveCount(0)
+  // The PM can't add a builder quote; the page says it's waiting on an estimator.
+  await expect(page.getByRole('button', { name: 'New Quote' })).toHaveCount(0)
   await expect(page.getByText('Waiting for the PM to assign an estimator.')).toBeVisible()
 
   // Assign an estimator from the Project Team panel.
@@ -622,10 +789,8 @@ test('PM creates a project (auto-assigned), cannot import, assigns an estimator'
       assigned_by: PM_ID,
     }),
   ])
-  await expect(
-    page.getByText('Waiting for the assigned estimator to upload the quotation'),
-  ).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Upload Quotation' })).toHaveCount(0)
+  await expect(page.getByText('Waiting for the PM to assign an estimator.')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'New Quote' })).toHaveCount(0)
 })
 
 test('Estimator cannot create projects; assigned estimator imports and submits', async ({
@@ -637,7 +802,7 @@ test('Estimator cannot create projects; assigned estimator imports and submits',
   })
   await signIn(page, 'estimator')
 
-  await page.getByRole('link', { name: 'Projects' }).click()
+  await page.getByRole('link', { name: 'Projects', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'New Project' })).toHaveCount(0)
 
@@ -676,9 +841,10 @@ test('Other PM can view a project but cannot approve or manage its team', async 
   await expect(page.getByLabel('Estimator to assign')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Edit Project Info' })).toHaveCount(0)
 
-  // Hardware page: can view, cannot approve.
-  await page.getByRole('link', { name: 'Open Hardware Schedule' }).click()
-  await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/hardware$`))
+  // Quote page: can view, cannot approve.
+  await expect(page.getByTestId('hardware-quote-row')).toContainText(BUILDER)
+  await page.getByRole('link', { name: 'Open Quote' }).click()
+  await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/hardware\\?quote=${QUOTE_ID}$`))
   await expect(page.getByText(/Awaiting PM review/)).toBeVisible()
   await expect(page.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Request Changes' })).toHaveCount(0)
@@ -715,13 +881,15 @@ test('Admin: create project -> import quotation -> submit -> approve -> export E
   const downloadPromise = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Download' }).click()
   const download = await downloadPromise
-  expect(download.suggestedFilename()).toBe('SV999_E2E_Test_Tower-v1.xlsx')
+  expect(download.suggestedFilename()).toBe('SV999_E2E_Test_Tower_Mena_Builders-v1.xlsx')
 
   const filePath = await download.path()
   expect(filePath).toBeTruthy()
   const exportedWb = new ExcelJS.Workbook()
   await exportedWb.xlsx.readFile(filePath!)
-  const hwSheet = exportedWb.getWorksheet('HARDWARE')
+  // One worksheet per supplier sheet, named after it.
+  expect(exportedWb.worksheets.map((w) => w.name)).toEqual(['MM'])
+  const hwSheet = exportedWb.getWorksheet('MM')
   expect(hwSheet).toBeDefined()
   // Header rows 1-4 (NOVAS Template layout)
   expect(hwSheet!.getCell('A1').value).toBe('NOVAS HARDWARE - SATIN STAINLESS STEEL')
@@ -814,17 +982,22 @@ test('Assigned estimator re-imports an updated quotation: unchanged groups keep 
 
   await expect(page.getByRole('heading', { name: 'Re-import Quotation' })).toHaveCount(0)
 
+  expect(state.lastReimport!.p_quote_id).toBe(QUOTE_ID)
   const groups = state.lastReimport!.p_groups
   expect(groups).toHaveLength(2)
+  // The kept group is copied by the database on every sheet (lines are not sent).
   const fire = groups.find((g) => g.group_key === fireKey)!
   expect(fire.door_qty).toBe(4)
   expect(fire.pm_remarks).toBe('Check closer finish')
-  expect(fire.lines).toEqual([
-    expect.objectContaining({ sku: 'MMHINGE', unit_price: 4, origin: 'set' }),
-    expect.objectContaining({ sku: '505BC+SLC', unit_price: 99, origin: 'edited' }),
-  ])
+  expect(fire.carried_from_group_id).toBe('group-v1-1')
+  expect(fire.lines).toEqual([])
   const bath = groups.find((g) => g.group_key !== fireKey)!
+  expect(bath.carried_from_group_id).toBeUndefined()
   expect(bath.lines).toEqual([expect.objectContaining({ sku: 'MMHINGE', origin: 'set' })])
+
+  // v2 keeps the edited closer price.
+  const closerRow = page.getByRole('row').filter({ hasText: '505BC+SLC' })
+  await expect(closerRow).toContainText('99.00')
 })
 
 test('PM home: Dashboard lists the version to review; the bell opens it and marks it read', async ({
@@ -854,13 +1027,13 @@ test('PM home: Dashboard lists the version to review; the bell opens it and mark
   // Dashboard: the submitted version is in the review queue.
   const review = page.locator('section', { has: page.getByRole('heading', { name: 'Waiting for your review' }) })
   await expect(review.getByRole('link', { name: new RegExp(PROJECT_NAME) })).toBeVisible()
-  await expect(review.getByText('v1 · SUBMITTED')).toBeVisible()
+  await expect(review.getByText(`${BUILDER} v1 · SUBMITTED`)).toBeVisible()
 
-  // Bell: one unread; opening it goes to the hardware page and marks it read.
+  // Bell: one unread; opening it goes to the version's quote and marks it read.
   await expect(page.getByTestId('notification-count')).toHaveText('1')
   await page.getByRole('button', { name: /Notifications/ }).click()
   await page.getByRole('button', { name: new RegExp('waiting for your review') }).click()
-  await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/hardware$`))
+  await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/hardware\\?quote=${QUOTE_ID}$`))
   await expect.poll(() => state.notifications[0].read_at).not.toBeNull()
   await expect(page.getByTestId('notification-count')).toHaveCount(0)
 })
@@ -958,20 +1131,56 @@ test('Project overview: Activities lists who did what and when, with filters', a
   await expect(panel).toContainText('added Erin Estimator as an estimator')
 })
 
-test('Projects list: the assigned PM changes the stage; an estimator only sees it', async ({ page }) => {
+test('Projects list: the assigned PM awards the project to a quote and sheet', async ({ page }) => {
   const state = await mockSupabase(page, 'pm', {
     project: existingProject(PM_ID),
     estimators: [assignedEstimator(PM_ID)],
+    quotes: [
+      { id: QUOTE_ID, project_id: PROJECT_ID, builder_name: BUILDER, created_by: PM_ID, created_at: TS, updated_at: TS },
+      { id: QUOTE2_ID, project_id: PROJECT_ID, builder_name: 'Bolt Construct', created_by: PM_ID, created_at: '2026-11-18T01:00:00Z', updated_at: TS },
+    ],
+    versions: [
+      {
+        id: VERSION_ID, project_id: PROJECT_ID, quote_id: QUOTE_ID, version_no: 1, status: 'approved',
+        upload_id: UPLOAD_ID, markup_pct: 12, created_by: ESTIMATOR_ID,
+        submitted_at: TS, created_at: TS, updated_at: TS,
+      },
+      {
+        id: VERSION2_ID, project_id: PROJECT_ID, quote_id: QUOTE2_ID, version_no: 1, status: 'draft',
+        upload_id: UPLOAD_ID, markup_pct: 12, created_by: ESTIMATOR_ID,
+        submitted_at: null, created_at: TS, updated_at: TS,
+      },
+    ],
+    sheets: [
+      { id: 'sheet-a-mm', version_id: VERSION_ID, supplier_id: SUPPLIER_ID, name: 'MM', position: 0, created_at: TS, updated_at: TS },
+      { id: 'sheet-a-nv', version_id: VERSION_ID, supplier_id: SUPPLIER2_ID, name: 'Novas option', position: 1, created_at: TS, updated_at: TS },
+    ],
   })
   await signIn(page, 'pm')
   await page.goto('/projects')
 
   await expect(page.getByRole('columnheader', { name: 'Stage' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Quotes' })).toBeVisible()
+  await expect(page.getByRole('cell', { name: /Mena Builders.*v1.*approved/i })).toBeVisible()
   const stage = page.getByRole('button', { name: 'Stage of SV999 — E2E Test Tower' })
   await expect(stage).toHaveText('Tender')
   await stage.click()
-  await page.getByRole('option', { name: 'Awarded' }).click()
-  await expect.poll(() => state.lastProjectUpdate).toEqual({ stage: 'awarded' })
+  await page.getByRole('listbox').getByRole('option', { name: 'Awarded' }).click()
+
+  // Awarding asks for the winner: only the approved quote can win.
+  const dialog = page.getByRole('dialog', { name: 'Award Project' })
+  await expect(dialog.getByRole('radio', { name: /Bolt Construct/ })).toBeDisabled()
+  await expect(dialog.getByRole('radio', { name: /Mena Builders/ })).toBeChecked()
+  await expect(dialog.getByRole('button', { name: 'Award Project' })).toBeDisabled()
+  await dialog.getByRole('radio', { name: 'Novas option' }).check()
+  await dialog.getByRole('button', { name: 'Award Project' }).click()
+
+  await expect.poll(() => state.lastProjectUpdate).toEqual({
+    stage: 'awarded',
+    awarded_quote_id: QUOTE_ID,
+    awarded_supplier_id: SUPPLIER2_ID,
+  })
+  await expect(dialog).toHaveCount(0)
   await expect(stage).toHaveText('Awarded')
   await expect(page.getByRole('listbox')).toHaveCount(0)
 
@@ -1100,4 +1309,156 @@ test('Hardware grid: NOVAS Template columns and editable MHQT remarks', async ({
   await page.keyboard.press('Enter')
   await expect.poll(() => state.lines.find((l) => l.id === 'pline-c-1')?.mhqt_remarks).toBe('Supply only')
   await expect(hingeRow).toContainText('Supply only')
+})
+
+test('Supplier sheets: add a sheet, flag other-supplier parts, rename, export both', async ({ page }) => {
+  const state = await mockSupabase(page, 'estimator', COMMENT_SEED('draft'))
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/hardware`)
+
+  await expect(page.getByTestId('sheet-tab')).toHaveText(['MM'])
+  // MM parts on the MM sheet: no flag.
+  await expect(page.getByTestId('other-supplier-badge')).toHaveCount(0)
+
+  // Add a NOVAS sheet: same door groups and parts, copied from MM.
+  await page.getByTestId('add-sheet').click()
+  const dialog = page.getByRole('dialog', { name: 'Add Supplier Sheet' })
+  // MM already has a sheet, so only NOVAS is offered.
+  await expect(dialog.getByLabel('Supplier').locator('option')).toHaveText([
+    'Select supplier...',
+    'NOVAS',
+  ])
+  await dialog.getByLabel('Supplier').selectOption({ label: 'NOVAS' })
+  await dialog.getByRole('button', { name: 'Add Sheet' }).click()
+
+  await expect(page.getByTestId('sheet-tab')).toHaveText(['MM', 'NOVAS'])
+  await expect(page.getByRole('tab', { name: 'NOVAS' })).toHaveAttribute('aria-selected', 'true')
+  expect(state.sheets.filter((s) => s.version_id === VERSION_ID)).toHaveLength(2)
+  // The copied MM hinge is flagged on the NOVAS sheet.
+  const hingeRow = page.getByRole('row').filter({ hasText: 'MMHINGE' })
+  await expect(hingeRow.getByTestId('other-supplier-badge')).toBeVisible()
+
+  // Part suggestions: NOVAS parts only, unless other suppliers are allowed.
+  await hingeRow.locator('td').nth(7).locator('div[tabindex]').dblclick()
+  await page.getByPlaceholder('SKU...').fill('HINGE')
+  await expect(page.getByRole('listbox', { name: 'Part suggestions' }).getByRole('option')).toHaveCount(1)
+  await expect(page.getByRole('listbox', { name: 'Part suggestions' }).getByRole('option')).toContainText('NV-HINGE')
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Escape')
+  await page.getByTestId('other-suppliers-toggle').check()
+  await hingeRow.locator('td').nth(7).locator('div[tabindex]').dblclick()
+  await page.getByPlaceholder('SKU...').fill('HINGE')
+  await expect(page.getByRole('listbox', { name: 'Part suggestions' }).getByRole('option')).toHaveCount(2)
+  // Swap to the NOVAS hinge: the flag goes away.
+  await page.getByRole('option', { name: /NV-HINGE/ }).click()
+  const novasRow = page.getByRole('row').filter({ hasText: 'NV-HINGE' })
+  await expect(novasRow).toBeVisible()
+  await expect(novasRow.getByTestId('other-supplier-badge')).toHaveCount(0)
+  await expect
+    .poll(() => state.lines.find((l) => l.sheet_id !== sheetIdFor(VERSION_ID) && l.sku === 'NV-HINGE')?.unit_price)
+    .toBe(6)
+  // The MM sheet still has the MM hinge.
+  await page.getByRole('tab', { name: 'MM' }).click()
+  await expect(page.getByRole('row').filter({ hasText: 'MMHINGE' })).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'NV-HINGE' })).toHaveCount(0)
+
+  // Rename the NOVAS sheet.
+  await page.getByRole('tab', { name: 'NOVAS' }).click()
+  await page.getByRole('button', { name: 'Rename the NOVAS sheet' }).click()
+  await page.getByLabel('Sheet name').fill('Novas (option B)')
+  await page.getByRole('button', { name: 'Save' }).click()
+  await expect(page.getByTestId('sheet-tab')).toHaveText(['MM', 'Novas (option B)'])
+
+  // Export: one worksheet per sheet.
+  await page.getByRole('button', { name: 'Export Excel' }).click()
+  const now = new Date()
+  await page.locator(`[data-day="${now.getMonth() + 1}/15/${now.getFullYear()}"]`).first().click()
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Download' }).click()
+  const download = await downloadPromise
+  const wb = new ExcelJS.Workbook()
+  await wb.xlsx.readFile((await download.path())!)
+  expect(wb.worksheets.map((w) => w.name)).toEqual(['MM', 'Novas (option B)'])
+  expect(wb.getWorksheet('MM')!.getCell('C7').value).toBe('MMHINGE')
+  expect(wb.getWorksheet('Novas (option B)')!.getCell('C7').value).toBe('NV-HINGE')
+})
+
+test('PM comments on one supplier sheet', async ({ page }) => {
+  const state = await mockSupabase(page, 'pm', {
+    ...COMMENT_SEED('submitted'),
+    sheets: [
+      { id: sheetIdFor(VERSION_ID), version_id: VERSION_ID, supplier_id: SUPPLIER_ID, name: 'MM', position: 0, created_at: TS, updated_at: TS },
+      { id: 'sheet-nv', version_id: VERSION_ID, supplier_id: SUPPLIER2_ID, name: 'NOVAS', position: 1, created_at: TS, updated_at: TS },
+    ],
+  })
+  await signIn(page, 'pm')
+  await page.goto(`/projects/${PROJECT_ID}/hardware`)
+
+  await page.getByRole('tab', { name: 'NOVAS' }).click()
+  await page.getByRole('button', { name: 'PM Comments (0)' }).click()
+  const drawer = page.getByTestId('comments-drawer')
+  // New comments point at the sheet open in the grid.
+  await expect(drawer.getByLabel('for', { exact: true })).toHaveValue('sheet-nv')
+  await drawer.getByPlaceholder('Write a comment for the estimators...').fill('NOVAS is cheaper on hinges')
+  await drawer.getByRole('button', { name: 'Post comment' }).click()
+
+  await expect.poll(() => state.comments.length).toBe(1)
+  expect(state.comments[0]).toMatchObject({ version_id: VERSION_ID, sheet_id: 'sheet-nv', door_group_id: null })
+  await expect(drawer.getByTestId('comment-sheet')).toHaveText('Sheet: NOVAS')
+  // The tab shows the count.
+  await expect(page.getByRole('tab', { name: /^NOVAS\s*1$/ })).toBeVisible()
+})
+
+test('Awarded project: the other quotes are read-only and no quote can be added', async ({ page }) => {
+  await mockSupabase(page, 'estimator', {
+    project: {
+      ...existingProject(PM_ID),
+      stage: 'awarded',
+      awarded_quote_id: QUOTE2_ID,
+      awarded_supplier_id: SUPPLIER_ID,
+    },
+    estimators: [assignedEstimator(PM_ID)],
+    quotes: [
+      { id: QUOTE_ID, project_id: PROJECT_ID, builder_name: BUILDER, created_by: PM_ID, created_at: TS, updated_at: TS },
+      { id: QUOTE2_ID, project_id: PROJECT_ID, builder_name: 'Bolt Construct', created_by: PM_ID, created_at: '2026-11-18T01:00:00Z', updated_at: TS },
+    ],
+    versions: [
+      {
+        id: VERSION_ID, project_id: PROJECT_ID, quote_id: QUOTE_ID, version_no: 1, status: 'draft',
+        upload_id: UPLOAD_ID, markup_pct: 15, created_by: ESTIMATOR_ID,
+        submitted_at: null, created_at: TS, updated_at: TS,
+      },
+      {
+        id: VERSION2_ID, project_id: PROJECT_ID, quote_id: QUOTE2_ID, version_no: 1, status: 'approved',
+        upload_id: UPLOAD_ID, markup_pct: 15, created_by: ESTIMATOR_ID,
+        submitted_at: TS, created_at: TS, updated_at: TS,
+      },
+    ],
+    doorGroups: COMMENT_SEED('draft').doorGroups,
+    lines: COMMENT_SEED('draft').lines,
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}`)
+
+  // Overview: the winner is marked, the other quote is read-only, no New Quote.
+  const rows = page.getByTestId('hardware-quote-row')
+  await expect(rows.filter({ hasText: 'Bolt Construct' })).toContainText('Awarded · MM')
+  await expect(rows.filter({ hasText: BUILDER })).toContainText('Not awarded (read-only)')
+  await expect(page.getByRole('button', { name: 'New Quote' })).toHaveCount(0)
+  await expect(page.getByText('Awarded — no new quotes.')).toBeVisible()
+
+  // The losing quote opens read-only: no submit, no sheet changes, no editing.
+  await page.goto(`/projects/${PROJECT_ID}/hardware?quote=${QUOTE_ID}`)
+  await expect(page.getByText('The project was awarded to another quote; this one is read-only.')).toBeVisible()
+  await expect(page.getByText('LOBBY')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Submit for Approval' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Re-import Quotation' })).toHaveCount(0)
+  await expect(page.getByTestId('add-sheet')).toHaveCount(0)
+  await expect(page.getByRole('columnheader', { name: 'ACTIONS' })).toHaveCount(0)
+
+  // The quote switcher marks the winner.
+  await expect(page.getByTestId('quote-select').locator('option')).toHaveText([
+    BUILDER,
+    'Bolt Construct (awarded)',
+  ])
 })
