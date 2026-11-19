@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import ExcelJS from 'exceljs'
 import type { DoorGroup, ProjectLine, ProjectVersion } from '@/types/database'
-import { buildProjectExportWorkbook } from '@/features/projects/projectExcelExport'
+import { buildProjectExportWorkbook, worksheetNames } from '@/features/projects/projectExcelExport'
 
 describe('buildProjectExportWorkbook', () => {
   it('exports the NOVAS Template layout with markup, formulas, blank prices, and green added rows', async () => {
     const version: ProjectVersion = {
       id: 'v1',
       project_id: 'p1',
+      quote_id: 'q1',
       version_no: 1,
       status: 'approved',
       upload_id: null,
@@ -44,6 +45,7 @@ describe('buildProjectExportWorkbook', () => {
       {
         id: 'l1',
         group_id: 'g1',
+        sheet_id: 's1',
         position: 1,
         sku: 'MMHINGE',
         description: 'HINGES 100X100',
@@ -58,6 +60,7 @@ describe('buildProjectExportWorkbook', () => {
       {
         id: 'l2',
         group_id: 'g1',
+        sheet_id: 's1',
         position: 2,
         sku: 'CUSTOMSEAL',
         description: 'ADDED DROP SEAL',
@@ -164,5 +167,90 @@ describe('buildProjectExportWorkbook', () => {
     expect((ws!.getCell('C8').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFDCFCE7')
 
     expect(ws!.getCell('A1').isMerged).toBe(true)
+  })
+
+  it('writes one worksheet per supplier sheet with its own lines and totals', async () => {
+    const version: ProjectVersion = {
+      id: 'v1',
+      project_id: 'p1',
+      quote_id: 'q1',
+      version_no: 2,
+      status: 'draft',
+      upload_id: null,
+      markup_pct: 0,
+      created_by: 'u1',
+      submitted_at: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+    const group: DoorGroup = {
+      id: 'g1',
+      version_id: 'v1',
+      position: 1,
+      group_key: 'ENTRY',
+      door_tag: '',
+      room_name: 'ENTRY',
+      classification: '',
+      leaf: 'SINGLE',
+      door_size: '',
+      door_qty: 1,
+      matched_set_id: null,
+      match_status: 'confirmed',
+      match_score: 1,
+      match_reason: '',
+      pm_remarks: '',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+    const line = (id: string, sheet: string, sku: string, price: number): ProjectLine => ({
+      id,
+      group_id: 'g1',
+      sheet_id: sheet,
+      position: 1,
+      sku,
+      description: sku,
+      qty_per_door: 1,
+      unit_price: price,
+      origin: 'set',
+      part_id: null,
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    })
+
+    const buf = await buildProjectExportWorkbook({
+      projectName: 'SV002',
+      clientName: 'Acme Builders',
+      scheduleNo: '9/9/2026',
+      version,
+      groups: [group],
+      lines: [line('a', 'sA', 'ALPHA-1', 10), line('b', 'sB', 'BETA-1', 20)],
+      sheets: [
+        { id: 'sA', name: 'Alpha Supplies' },
+        { id: 'sB', name: 'Beta / Co' },
+      ],
+    })
+
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.load(buf)
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Alpha Supplies', 'Beta Co'])
+    const alpha = wb.getWorksheet('Alpha Supplies')!
+    const beta = wb.getWorksheet('Beta Co')!
+    expect(alpha.getCell('C7').value).toBe('ALPHA-1')
+    expect(beta.getCell('C7').value).toBe('BETA-1')
+    expect(beta.getCell('B3').value).toBe('ACME BUILDERS')
+    // 1 door × $20 + $1.50 delivery
+    expect((beta.getCell('K3').value as { result: number }).result).toBeCloseTo(21.5, 4)
+  })
+})
+
+describe('worksheetNames', () => {
+  it('removes characters Excel rejects, shortens to 31 and keeps names unique', () => {
+    expect(worksheetNames(['A/B', 'a b', 'x'.repeat(40), '', "'quoted'"])).toEqual([
+      'A B',
+      'a b (2)',
+      'x'.repeat(31),
+      'Sheet 4',
+      'quoted',
+    ])
   })
 })

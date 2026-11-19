@@ -12,6 +12,8 @@ import { DELIVERY_PER_DOOR } from '@/features/projects/pricing'
  *             Overall HW Price per Typical Door | Total Items per Typical Door |
  *             MHQT REMARKS (from each line's remarks in the grid)
  *   then      one grey "DOOR QTY:" row per door group followed by its lines.
+ * With supplier sheets, the workbook has one worksheet per sheet (same layout,
+ * that sheet's lines and totals), named after the sheet.
  */
 
 /** Default sheet title (row 1); editable in the export dialog. */
@@ -30,6 +32,10 @@ export interface ProjectExportInput {
   version: ProjectVersion
   groups: DoorGroup[]
   lines: ProjectLine[]
+  /** Supplier sheets, in tab order: one worksheet each. Without them, one "HARDWARE" worksheet. */
+  sheets?: { id: string; name: string }[]
+  /** Builder of the quote, added to the file name. */
+  quoteName?: string
   /** Library parts, for each line's supplier (matched by part id, else SKU). */
   parts?: Pick<Part, 'id' | 'sku' | 'suppliers'>[]
 }
@@ -97,6 +103,21 @@ function doorTypeLabel(group: DoorGroup): string {
   return `${leaf} ${cls}`
 }
 
+/** Excel worksheet names: at most 31 characters, none of : \\ / ? * [ ], unique (case-insensitive). */
+export function worksheetNames(names: string[]): string[] {
+  const used = new Set<string>()
+  return names.map((raw, idx) => {
+    const base = raw.replace(/[:\\/?*[\]]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^'+|'+$/g, '') || `Sheet ${idx + 1}`
+    let name = base.slice(0, 31)
+    for (let n = 2; used.has(name.toLowerCase()); n++) {
+      const suffix = ` (${n})`
+      name = base.slice(0, 31 - suffix.length) + suffix
+    }
+    used.add(name.toLowerCase())
+    return name
+  })
+}
+
 function doorTagOf(group: DoorGroup): string {
   return (
     group.door_tag ||
@@ -115,6 +136,7 @@ export async function buildProjectExportWorkbook({
   version,
   groups,
   lines,
+  sheets,
   parts = [],
 }: ProjectExportInput): Promise<ArrayBuffer> {
   const ExcelJSLib = await loadExcelJS()
@@ -122,193 +144,204 @@ export async function buildProjectExportWorkbook({
   wb.creator = 'Mena Hardware'
   wb.created = new Date()
 
-  const ws = wb.addWorksheet('HARDWARE')
-  const markupRate = Number(version.markup_pct ?? 15) / 100
-  const markupFactor = 1 + markupRate
-
-  // Supplier per line: from its library part (by id, else by SKU).
-  const partById = new Map(parts.map((p) => [p.id, p]))
-  const partBySku = new Map(parts.map((p) => [p.sku.trim().toUpperCase(), p]))
-  const partOf = (line: ProjectLine) =>
-    (line.part_id ? partById.get(line.part_id) : undefined) ?? partBySku.get(line.sku.trim().toUpperCase())
-
-  const linesByGroup = new Map<string, ProjectLine[]>()
-  for (const g of groups) linesByGroup.set(g.id, [])
-  for (const l of lines) linesByGroup.get(l.group_id)?.push(l)
-  for (const arr of linesByGroup.values()) arr.sort((a, b) => a.position - b.position)
-
-  const totalDoors = groups.reduce((sum, g) => sum + Number(g.door_qty), 0)
-
-  COLUMN_WIDTHS.forEach((w, i) => (ws.getColumn(i + 1).width = w))
-  for (let c = 1; c <= 13; c++) ws.getColumn(c).font = { name: FONT, size: 10 }
-
-  const setCell = (
-    ref: string,
-    value: ExcelJS.CellValue,
-    style: { bold?: boolean; size?: number; color?: { argb: string }; fill?: ExcelJS.Fill; numFmt?: string; align?: ExcelJS.Alignment['horizontal'] } = {},
-  ) => {
-    const cell = ws.getCell(ref)
-    cell.value = value
-    cell.font = { name: FONT, size: style.size ?? 10, bold: style.bold ?? true, color: style.color }
-    if (style.fill) cell.fill = style.fill
-    if (style.numFmt) cell.numFmt = style.numFmt
-    cell.alignment = { horizontal: style.align, vertical: 'middle' }
-    return cell
+  if (sheets && sheets.length > 0) {
+    const names = worksheetNames(sheets.map((sh) => sh.name))
+    sheets.forEach((sh, idx) => {
+      addHardwareWorksheet(wb, names[idx], lines.filter((l) => l.sheet_id === sh.id))
+    })
+  } else {
+    addHardwareWorksheet(wb, 'HARDWARE', lines)
   }
-
-  // ---------------------------------------------------------------- rows 1-4
-  ws.mergeCells('A1:L1')
-  setCell('A1', (sheetTitle?.trim() || DEFAULT_EXPORT_TITLE).toUpperCase(), { size: 12, color: GREY_TEXT, align: 'left' })
-  setCell('A2', 'Project:', { color: GREY_TEXT, align: 'left' })
-  setCell('B2', (projectTitle || projectName).toUpperCase(), { color: GREY_TEXT, align: 'left' })
-  setCell('A3', 'Client:', { color: GREY_TEXT, align: 'left' })
-  setCell('B3', (clientName || '').toUpperCase(), { color: GREY_TEXT, align: 'left' })
-  setCell('A4', 'Schedule #:', { color: GREY_TEXT, align: 'left' })
-  const scheduleValue = scheduleCellValue(scheduleNo)
-  setCell('B4', scheduleValue, {
-    color: GREY_TEXT,
-    align: 'left',
-    numFmt: scheduleValue instanceof Date ? DATE_FMT : undefined,
-  })
-  for (const r of [1, 2, 3, 4]) ws.getRow(r).height = 17.1
-
-  // Markup (F2:F3) and the cost / margin of the whole schedule (G3:G4)
-  setCell('F2', 'MARKUP', { align: 'center' })
-  const markupCell = setCell('F3', markupRate, { color: MARKUP_TEXT, fill: LIGHT_BLUE_FILL, numFmt: PERCENT_FMT, align: 'center' })
-  markupCell.border = { top: MEDIUM, left: MEDIUM, bottom: MEDIUM, right: MEDIUM }
-
-  // Overall door qty and deliveries (row 4)
-  setCell('D4', 'OVERALL DOOR QTY:', { color: NAVY_TEXT, align: 'right' })
-  setCell('J4', 'DELIVERIES', { color: GREY_TEXT, align: 'right' })
-
-  // Totals (K2:K3)
-  setCell('K2', 'TOTAL EX. GST', { align: 'center' })
-  setCell('J3', 'INCL. DELIVERIES / EXCL. GST', { color: GREY_TEXT, align: 'right' })
-
-  // ------------------------------------------------------------ table header
-  const headerRow = ws.getRow(TABLE_HEADER_ROW)
-  headerRow.height = 27.95
-  TABLE_HEADERS.forEach((title, idx) => {
-    const cell = headerRow.getCell(idx + 1)
-    cell.value = title
-    cell.font = { name: FONT, size: 10, bold: true }
-    cell.fill = idx === 12 ? REMARKS_FILL : HEADER_FILL
-    cell.alignment = { horizontal: idx >= 4 ? 'center' : undefined, vertical: 'middle', wrapText: title.includes('\n') }
-    if (idx <= 10) cell.border = { top: THIN, bottom: THIN }
-  })
-
-  // ------------------------------------------------------------- door groups
-  let currentRow = TABLE_HEADER_ROW + 1
-  let noPriceCount = 0
-  let grandTotal = 0 // Σ door qty × price per door (with markup)
-
-  for (const group of groups) {
-    const groupLines = linesByGroup.get(group.id) ?? []
-    const doorQty = Number(group.door_qty)
-    const g = currentRow++
-    const first = currentRow
-    const last = first + groupLines.length - 1
-
-    const costPerDoor = groupLines.reduce(
-      (sum, l) => (l.unit_price === null ? sum : sum + Number(l.qty_per_door) * Number(l.unit_price)),
-      0,
-    )
-    const pricePerDoor = costPerDoor * markupFactor
-    grandTotal += doorQty * pricePerDoor
-
-    const gRow = ws.getRow(g)
-    gRow.getCell(1).value = group.room_name
-    gRow.getCell(2).value = doorTagOf(group)
-    gRow.getCell(3).value = doorTypeLabel(group)
-    gRow.getCell(4).value = 'DOOR QTY:'
-    gRow.getCell(5).value = doorQty
-    gRow.getCell(7).value = groupLines.length ? { formula: `SUM(G${first}:G${last})`, result: costPerDoor } : 0
-    gRow.getCell(9).value = groupLines.length ? { formula: `SUM(I${first}:I${last})`, result: pricePerDoor } : 0
-    gRow.getCell(10).value = { formula: `I${g}`, result: pricePerDoor }
-    gRow.getCell(11).value = { formula: `E${g}*I${g}`, result: doorQty * pricePerDoor }
-
-    for (let c = 1; c <= 11; c++) {
-      const cell = gRow.getCell(c)
-      cell.font = { name: FONT, size: 10, bold: c !== 10 }
-      cell.fill = c === 5 ? DOOR_QTY_FILL : c === 11 ? BLUE_FILL : HEADER_FILL
-      cell.border = { top: THIN, bottom: THIN }
-      cell.alignment = { vertical: 'middle', horizontal: c === 4 ? 'right' : c === 5 ? 'center' : undefined }
-      if (c >= 6 && c <= 10) cell.numFmt = ACCOUNTING_FMT
-      if (c === 11) cell.numFmt = TOTAL_FMT
-    }
-
-    for (const line of groupLines) {
-      const r = currentRow++
-      const row = ws.getRow(r)
-      const part = partOf(line)
-      const supplier = part?.suppliers?.name ?? ''
-      const ownerSupplied = part?.suppliers?.is_owner_supplied ?? false
-      const qty = Number(line.qty_per_door)
-      const hasPrice = line.unit_price !== null
-      const cost = hasPrice ? Number(line.unit_price) : null
-
-      // LEGEND: "MM" for owner-supplied (Mena) items, as in the template.
-      if (ownerSupplied) row.getCell(1).value = 'MM'
-      if (supplier) row.getCell(2).value = supplier
-      row.getCell(3).value = line.sku
-      row.getCell(4).value = line.description
-      row.getCell(5).value = qty
-      if (cost !== null) {
-        row.getCell(6).value = cost
-        row.getCell(7).value = { formula: `IFERROR(E${r}*F${r},"")`, result: qty * cost }
-        row.getCell(8).value = { formula: `F${r}*(1+$F$3)`, result: cost * markupFactor }
-        row.getCell(9).value = { formula: `E${r}*H${r}`, result: qty * cost * markupFactor }
-      }
-      row.getCell(12).value = { formula: `E${r}*$E$${g}`, result: qty * doorQty }
-      if (line.mhqt_remarks?.trim()) row.getCell(13).value = line.mhqt_remarks.trim()
-
-      const added = line.origin === 'added'
-      for (let c = 1; c <= 13; c++) {
-        const cell = row.getCell(c)
-        cell.font = { name: FONT, size: 10 }
-        cell.alignment = {
-          vertical: 'middle',
-          horizontal: c === 5 || c === 12 ? 'center' : undefined,
-          wrapText: c === 13 ? true : undefined,
-        }
-        if (c <= 9) cell.border = { bottom: THIN }
-        if (c >= 6 && c <= 10) cell.numFmt = ACCOUNTING_FMT
-        if (added && c <= 9) cell.fill = ADDED_FILL
-        // Blank price: highlighted and noted, so it isn't mistaken for $0.
-        if (!hasPrice && c >= 6 && c <= 9) cell.fill = NO_PRICE_FILL
-      }
-      if (!hasPrice) {
-        noPriceCount++
-        row.getCell(6).note = NO_PRICE_NOTE
-      }
-    }
-  }
-
-  // ------------------------------------------------------------------ totals
-  const firstData = TABLE_HEADER_ROW + 1
-  const lastData = Math.max(currentRow - 1, firstData)
-  const deliveries = totalDoors * DELIVERY_PER_DOOR
-  const totalExGst = grandTotal + deliveries
-
-  setCell(
-    'E4',
-    { formula: `SUMIF($D$${firstData}:$D$${lastData},"DOOR QTY:",$E$${firstData}:$E$${lastData})`, result: totalDoors },
-    { color: NAVY_TEXT, align: 'center' },
-  )
-  setCell('K4', { formula: `+E4*${DELIVERY_PER_DOOR}`, result: deliveries }, { bold: false, fill: LIGHT_BLUE_FILL, numFmt: TOTAL_FMT, align: 'center' })
-  const totalCell = setCell('K3', { formula: `SUM(K4:K${lastData})`, result: totalExGst }, { size: 11, fill: BLUE_FILL, numFmt: TOTAL_FMT, align: 'center' })
-  if (noPriceCount > 0) {
-    totalCell.note = `Excludes ${noPriceCount} line${noPriceCount === 1 ? '' : 's'} with no unit price (highlighted)`
-  }
-  const beforeMarkup = setCell('G3', { formula: 'K3/(1+F3)', result: totalExGst / markupFactor }, { fill: PEACH_FILL, numFmt: TOTAL_FMT })
-  beforeMarkup.border = { left: MEDIUM }
-  setCell('G4', { formula: 'K3-G3', result: totalExGst - totalExGst / markupFactor }, { bold: false, numFmt: ACCOUNTING_FMT })
-
-  ws.views = [{ state: 'frozen', ySplit: TABLE_HEADER_ROW }]
-  ws.autoFilter = `A${TABLE_HEADER_ROW}:K${lastData}`
 
   const buf = await wb.xlsx.writeBuffer()
   return buf as ArrayBuffer
+
+  function addHardwareWorksheet(book: ExcelJS.Workbook, worksheetName: string, lines: ProjectLine[]) {
+    const ws = book.addWorksheet(worksheetName)
+    const markupRate = Number(version.markup_pct ?? 15) / 100
+    const markupFactor = 1 + markupRate
+
+    // Supplier per line: from its library part (by id, else by SKU).
+    const partById = new Map(parts.map((p) => [p.id, p]))
+    const partBySku = new Map(parts.map((p) => [p.sku.trim().toUpperCase(), p]))
+    const partOf = (line: ProjectLine) =>
+      (line.part_id ? partById.get(line.part_id) : undefined) ?? partBySku.get(line.sku.trim().toUpperCase())
+
+    const linesByGroup = new Map<string, ProjectLine[]>()
+    for (const g of groups) linesByGroup.set(g.id, [])
+    for (const l of lines) linesByGroup.get(l.group_id)?.push(l)
+    for (const arr of linesByGroup.values()) arr.sort((a, b) => a.position - b.position)
+
+    const totalDoors = groups.reduce((sum, g) => sum + Number(g.door_qty), 0)
+
+    COLUMN_WIDTHS.forEach((w, i) => (ws.getColumn(i + 1).width = w))
+    for (let c = 1; c <= 13; c++) ws.getColumn(c).font = { name: FONT, size: 10 }
+
+    const setCell = (
+      ref: string,
+      value: ExcelJS.CellValue,
+      style: { bold?: boolean; size?: number; color?: { argb: string }; fill?: ExcelJS.Fill; numFmt?: string; align?: ExcelJS.Alignment['horizontal'] } = {},
+    ) => {
+      const cell = ws.getCell(ref)
+      cell.value = value
+      cell.font = { name: FONT, size: style.size ?? 10, bold: style.bold ?? true, color: style.color }
+      if (style.fill) cell.fill = style.fill
+      if (style.numFmt) cell.numFmt = style.numFmt
+      cell.alignment = { horizontal: style.align, vertical: 'middle' }
+      return cell
+    }
+
+    // ---------------------------------------------------------------- rows 1-4
+    ws.mergeCells('A1:L1')
+    setCell('A1', (sheetTitle?.trim() || DEFAULT_EXPORT_TITLE).toUpperCase(), { size: 12, color: GREY_TEXT, align: 'left' })
+    setCell('A2', 'Project:', { color: GREY_TEXT, align: 'left' })
+    setCell('B2', (projectTitle || projectName).toUpperCase(), { color: GREY_TEXT, align: 'left' })
+    setCell('A3', 'Client:', { color: GREY_TEXT, align: 'left' })
+    setCell('B3', (clientName || '').toUpperCase(), { color: GREY_TEXT, align: 'left' })
+    setCell('A4', 'Schedule #:', { color: GREY_TEXT, align: 'left' })
+    const scheduleValue = scheduleCellValue(scheduleNo)
+    setCell('B4', scheduleValue, {
+      color: GREY_TEXT,
+      align: 'left',
+      numFmt: scheduleValue instanceof Date ? DATE_FMT : undefined,
+    })
+    for (const r of [1, 2, 3, 4]) ws.getRow(r).height = 17.1
+
+    // Markup (F2:F3) and the cost / margin of the whole schedule (G3:G4)
+    setCell('F2', 'MARKUP', { align: 'center' })
+    const markupCell = setCell('F3', markupRate, { color: MARKUP_TEXT, fill: LIGHT_BLUE_FILL, numFmt: PERCENT_FMT, align: 'center' })
+    markupCell.border = { top: MEDIUM, left: MEDIUM, bottom: MEDIUM, right: MEDIUM }
+
+    // Overall door qty and deliveries (row 4)
+    setCell('D4', 'OVERALL DOOR QTY:', { color: NAVY_TEXT, align: 'right' })
+    setCell('J4', 'DELIVERIES', { color: GREY_TEXT, align: 'right' })
+
+    // Totals (K2:K3)
+    setCell('K2', 'TOTAL EX. GST', { align: 'center' })
+    setCell('J3', 'INCL. DELIVERIES / EXCL. GST', { color: GREY_TEXT, align: 'right' })
+
+    // ------------------------------------------------------------ table header
+    const headerRow = ws.getRow(TABLE_HEADER_ROW)
+    headerRow.height = 27.95
+    TABLE_HEADERS.forEach((title, idx) => {
+      const cell = headerRow.getCell(idx + 1)
+      cell.value = title
+      cell.font = { name: FONT, size: 10, bold: true }
+      cell.fill = idx === 12 ? REMARKS_FILL : HEADER_FILL
+      cell.alignment = { horizontal: idx >= 4 ? 'center' : undefined, vertical: 'middle', wrapText: title.includes('\n') }
+      if (idx <= 10) cell.border = { top: THIN, bottom: THIN }
+    })
+
+    // ------------------------------------------------------------- door groups
+    let currentRow = TABLE_HEADER_ROW + 1
+    let noPriceCount = 0
+    let grandTotal = 0 // Σ door qty × price per door (with markup)
+
+    for (const group of groups) {
+      const groupLines = linesByGroup.get(group.id) ?? []
+      const doorQty = Number(group.door_qty)
+      const g = currentRow++
+      const first = currentRow
+      const last = first + groupLines.length - 1
+
+      const costPerDoor = groupLines.reduce(
+        (sum, l) => (l.unit_price === null ? sum : sum + Number(l.qty_per_door) * Number(l.unit_price)),
+        0,
+      )
+      const pricePerDoor = costPerDoor * markupFactor
+      grandTotal += doorQty * pricePerDoor
+
+      const gRow = ws.getRow(g)
+      gRow.getCell(1).value = group.room_name
+      gRow.getCell(2).value = doorTagOf(group)
+      gRow.getCell(3).value = doorTypeLabel(group)
+      gRow.getCell(4).value = 'DOOR QTY:'
+      gRow.getCell(5).value = doorQty
+      gRow.getCell(7).value = groupLines.length ? { formula: `SUM(G${first}:G${last})`, result: costPerDoor } : 0
+      gRow.getCell(9).value = groupLines.length ? { formula: `SUM(I${first}:I${last})`, result: pricePerDoor } : 0
+      gRow.getCell(10).value = { formula: `I${g}`, result: pricePerDoor }
+      gRow.getCell(11).value = { formula: `E${g}*I${g}`, result: doorQty * pricePerDoor }
+
+      for (let c = 1; c <= 11; c++) {
+        const cell = gRow.getCell(c)
+        cell.font = { name: FONT, size: 10, bold: c !== 10 }
+        cell.fill = c === 5 ? DOOR_QTY_FILL : c === 11 ? BLUE_FILL : HEADER_FILL
+        cell.border = { top: THIN, bottom: THIN }
+        cell.alignment = { vertical: 'middle', horizontal: c === 4 ? 'right' : c === 5 ? 'center' : undefined }
+        if (c >= 6 && c <= 10) cell.numFmt = ACCOUNTING_FMT
+        if (c === 11) cell.numFmt = TOTAL_FMT
+      }
+
+      for (const line of groupLines) {
+        const r = currentRow++
+        const row = ws.getRow(r)
+        const part = partOf(line)
+        const supplier = part?.suppliers?.name ?? ''
+        const ownerSupplied = part?.suppliers?.is_owner_supplied ?? false
+        const qty = Number(line.qty_per_door)
+        const hasPrice = line.unit_price !== null
+        const cost = hasPrice ? Number(line.unit_price) : null
+
+        // LEGEND: "MM" for owner-supplied (Mena) items, as in the template.
+        if (ownerSupplied) row.getCell(1).value = 'MM'
+        if (supplier) row.getCell(2).value = supplier
+        row.getCell(3).value = line.sku
+        row.getCell(4).value = line.description
+        row.getCell(5).value = qty
+        if (cost !== null) {
+          row.getCell(6).value = cost
+          row.getCell(7).value = { formula: `IFERROR(E${r}*F${r},"")`, result: qty * cost }
+          row.getCell(8).value = { formula: `F${r}*(1+$F$3)`, result: cost * markupFactor }
+          row.getCell(9).value = { formula: `E${r}*H${r}`, result: qty * cost * markupFactor }
+        }
+        row.getCell(12).value = { formula: `E${r}*$E$${g}`, result: qty * doorQty }
+        if (line.mhqt_remarks?.trim()) row.getCell(13).value = line.mhqt_remarks.trim()
+
+        const added = line.origin === 'added'
+        for (let c = 1; c <= 13; c++) {
+          const cell = row.getCell(c)
+          cell.font = { name: FONT, size: 10 }
+          cell.alignment = {
+            vertical: 'middle',
+            horizontal: c === 5 || c === 12 ? 'center' : undefined,
+            wrapText: c === 13 ? true : undefined,
+          }
+          if (c <= 9) cell.border = { bottom: THIN }
+          if (c >= 6 && c <= 10) cell.numFmt = ACCOUNTING_FMT
+          if (added && c <= 9) cell.fill = ADDED_FILL
+          // Blank price: highlighted and noted, so it isn't mistaken for $0.
+          if (!hasPrice && c >= 6 && c <= 9) cell.fill = NO_PRICE_FILL
+        }
+        if (!hasPrice) {
+          noPriceCount++
+          row.getCell(6).note = NO_PRICE_NOTE
+        }
+      }
+    }
+
+    // ------------------------------------------------------------------ totals
+    const firstData = TABLE_HEADER_ROW + 1
+    const lastData = Math.max(currentRow - 1, firstData)
+    const deliveries = totalDoors * DELIVERY_PER_DOOR
+    const totalExGst = grandTotal + deliveries
+
+    setCell(
+      'E4',
+      { formula: `SUMIF($D$${firstData}:$D$${lastData},"DOOR QTY:",$E$${firstData}:$E$${lastData})`, result: totalDoors },
+      { color: NAVY_TEXT, align: 'center' },
+    )
+    setCell('K4', { formula: `+E4*${DELIVERY_PER_DOOR}`, result: deliveries }, { bold: false, fill: LIGHT_BLUE_FILL, numFmt: TOTAL_FMT, align: 'center' })
+    const totalCell = setCell('K3', { formula: `SUM(K4:K${lastData})`, result: totalExGst }, { size: 11, fill: BLUE_FILL, numFmt: TOTAL_FMT, align: 'center' })
+    if (noPriceCount > 0) {
+      totalCell.note = `Excludes ${noPriceCount} line${noPriceCount === 1 ? '' : 's'} with no unit price (highlighted)`
+    }
+    const beforeMarkup = setCell('G3', { formula: 'K3/(1+F3)', result: totalExGst / markupFactor }, { fill: PEACH_FILL, numFmt: TOTAL_FMT })
+    beforeMarkup.border = { left: MEDIUM }
+    setCell('G4', { formula: 'K3-G3', result: totalExGst - totalExGst / markupFactor }, { bold: false, numFmt: ACCOUNTING_FMT })
+
+    ws.views = [{ state: 'frozen', ySplit: TABLE_HEADER_ROW }]
+    ws.autoFilter = `A${TABLE_HEADER_ROW}:K${lastData}`
+  }
 }
 
 export async function downloadProjectExcel(input: ProjectExportInput): Promise<void> {
@@ -316,7 +349,9 @@ export async function downloadProjectExcel(input: ProjectExportInput): Promise<v
   const blob = new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   })
-  const safeName = input.projectName
+  const safeName = [input.projectName, input.quoteName ?? '']
+    .filter((part) => part.trim())
+    .join(' ')
     .replace(/[^a-zA-Z0-9._-]+/g, '_')
     .replace(/^_+|_+$/g, '')
   const filename = `${safeName || 'project'}-v${input.version.version_no}.xlsx`
