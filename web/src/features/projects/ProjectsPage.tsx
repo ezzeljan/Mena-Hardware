@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, FolderKanban, Plus, Search, Trash2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/features/auth/AuthContext'
-import type { Profile, Project, ProjectStage, ProjectVersion } from '@/types/database'
+import type { HardwareQuote, Profile, Project, ProjectStage, ProjectVersion } from '@/types/database'
 import { StageBadge, StageSelect } from '@/features/projects/ProjectStage'
 import { CreateProjectForm } from '@/features/projects/CreateProjectWizard'
 import { deleteProjectWithStorage } from '@/features/projects/deleteProject'
@@ -32,7 +32,8 @@ import {
 } from '@/components/ui/table'
 
 interface ProjectRow extends Project {
-  project_versions?: Pick<ProjectVersion, 'id' | 'version_no' | 'status'>[]
+  hardware_quotes?: Pick<HardwareQuote, 'id' | 'builder_name'>[]
+  project_versions?: Pick<ProjectVersion, 'id' | 'quote_id' | 'version_no' | 'status'>[]
   project_estimators?: { estimator_id: string }[]
 }
 
@@ -54,7 +55,7 @@ export function ProjectsPage() {
       const { data, error } = await supabase
         .from('projects')
         .select(
-          'id, reference_no, name, client, site, status, stage, created_by, assigned_pm, created_at, updated_at, project_versions(id, version_no, status), project_estimators(estimator_id)',
+          'id, reference_no, name, client, site, status, stage, created_by, assigned_pm, created_at, updated_at, awarded_quote_id, awarded_supplier_id, hardware_quotes(id, builder_name), project_versions(id, quote_id, version_no, status), project_estimators(estimator_id)',
         )
         .order('updated_at', { ascending: false })
       if (error) throw error
@@ -124,10 +125,22 @@ export function ProjectsPage() {
     })
   }
 
-  function getLatestVersion(project: ProjectRow) {
-    const versions = project.project_versions ?? []
-    if (versions.length === 0) return null
-    return [...versions].sort((a, b) => b.version_no - a.version_no)[0] ?? null
+  /** Latest version of each builder quote (the awarded quote first). */
+  function getQuoteSummaries(project: ProjectRow) {
+    const latest = new Map<string, Pick<ProjectVersion, 'version_no' | 'status'>>()
+    for (const v of project.project_versions ?? []) {
+      const best = latest.get(v.quote_id)
+      if (!best || v.version_no > best.version_no) latest.set(v.quote_id, v)
+    }
+    return (project.hardware_quotes ?? [])
+      .filter((q) => latest.has(q.id))
+      .map((q) => ({
+        id: q.id,
+        builder: q.builder_name,
+        latest: latest.get(q.id)!,
+        winner: project.stage === 'awarded' && project.awarded_quote_id === q.id,
+      }))
+      .sort((a, b) => Number(b.winner) - Number(a.winner) || a.builder.localeCompare(b.builder))
   }
 
   return (
@@ -139,7 +152,7 @@ export function ProjectsPage() {
             <span>Projects</span>
           </h1>
           <p className="text-sm text-neutral-600 mt-0.5">
-            Building project hardware schedules, quotation uploads, versions, and PM approvals.
+            Builder hardware quotes per project: quotation uploads, supplier sheets, versions, and PM approvals.
           </p>
         </div>
 
@@ -233,7 +246,7 @@ export function ProjectsPage() {
               <TableHead>Site</TableHead>
               <TableHead>Stage</TableHead>
               <TableHead>Team</TableHead>
-              <TableHead>Latest Version</TableHead>
+              <TableHead>Quotes</TableHead>
               <TableHead>Project Status</TableHead>
               <TableHead>Updated</TableHead>
               <TableHead className="text-right">Open</TableHead>
@@ -241,7 +254,7 @@ export function ProjectsPage() {
           </TableHeader>
           <TableBody>
             {filteredProjects.map((project) => {
-              const latest = getLatestVersion(project)
+              const quoteSummaries = getQuoteSummaries(project)
               return (
                 <TableRow
                   key={project.id}
@@ -277,20 +290,32 @@ export function ProjectsPage() {
                     <AvatarStack people={teamOf(project)} />
                   </TableCell>
                   <TableCell>
-                    {latest ? (
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-xs font-semibold">
-                          v{latest.version_no}
-                        </span>
-                        <Badge
-                          variant={latest.status === 'approved' ? 'default' : 'outline'}
-                          className="uppercase tracking-wider text-[10px]"
-                        >
-                          {latest.status.replace('_', ' ')}
-                        </Badge>
-                      </div>
+                    {quoteSummaries.length > 0 ? (
+                      <ul className="space-y-1">
+                        {quoteSummaries.map((q) => (
+                          <li key={q.id} className="flex items-center gap-1.5 whitespace-nowrap">
+                            <span
+                              className={`max-w-[10rem] truncate text-xs ${
+                                q.winner ? 'font-semibold text-emerald-700' : 'text-neutral-700'
+                              }`}
+                              title={q.winner ? `${q.builder} (awarded)` : q.builder}
+                            >
+                              {q.builder}
+                            </span>
+                            <span className="font-mono text-xs font-semibold">
+                              v{q.latest.version_no}
+                            </span>
+                            <Badge
+                              variant={q.latest.status === 'approved' ? 'default' : 'outline'}
+                              className="uppercase tracking-wider text-[10px]"
+                            >
+                              {q.latest.status.replace('_', ' ')}
+                            </Badge>
+                          </li>
+                        ))}
+                      </ul>
                     ) : (
-                      <span className="text-xs text-neutral-400">No versions</span>
+                      <span className="text-xs text-neutral-400">No quotes</span>
                     )}
                   </TableCell>
                   <TableCell>

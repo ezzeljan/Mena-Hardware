@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import type { DoorGroup, ProjectLine } from '@/types/database'
+import type { DoorGroup } from '@/types/database'
 import type { ParsedDoorGroupPreview } from '@/features/projects/quotationParser'
 import {
-  carriedLinesPayload,
   customNameFromReason,
   diffQuotationGroups,
 } from '@/features/projects/quotationReimport'
@@ -71,28 +70,5 @@ describe('customNameFromReason', () => {
     expect(customNameFromReason('Custom: Plant Room Special')).toBe('Plant Room Special')
     expect(customNameFromReason('room ✓')).toBe('')
     expect(customNameFromReason(null)).toBe('')
-  })
-})
-
-describe('carriedLinesPayload', () => {
-  it('keeps edits and blank prices, and renumbers positions in order', () => {
-    const line = (id: string, position: number, unit_price: number | null): ProjectLine => ({
-      id,
-      group_id: 'g',
-      position,
-      sku: id.toUpperCase(),
-      description: id,
-      qty_per_door: 1,
-      unit_price,
-      origin: 'edited',
-      part_id: null,
-      created_at: TS,
-      updated_at: TS,
-    })
-    const payload = carriedLinesPayload([line('b', 7, null), line('a', 2, 4.5)])
-    expect(payload.map((l) => [l.position, l.sku, l.unit_price, l.origin])).toEqual([
-      [1, 'A', 4.5, 'edited'],
-      [2, 'B', null, 'edited'],
-    ])
   })
 })

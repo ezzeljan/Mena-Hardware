@@ -4,8 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, X } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/features/auth/AuthContext'
-import type { Profile, ProjectStage, ProjectStatus } from '@/types/database'
-import { PROJECT_STAGES } from '@/features/projects/ProjectStage'
+import type { Profile, ProjectStatus } from '@/types/database'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -32,7 +31,6 @@ export function CreateProjectForm({ pmProfiles, onCancel }: CreateProjectFormPro
   const [client, setClient] = useState('')
   const [site, setSite] = useState('')
   const [status, setStatus] = useState<ProjectStatus>('active')
-  const [stage, setStage] = useState<ProjectStage>('tender')
   const [assignedPm, setAssignedPm] = useState('')
   const [formError, setFormError] = useState<string | null>(null)
 
@@ -50,7 +48,8 @@ export function CreateProjectForm({ pmProfiles, onCancel }: CreateProjectFormPro
           client: client.trim(),
           site: site.trim(),
           status,
-          stage,
+          // New projects start at Tender; they are awarded once a quote wins.
+          stage: 'tender',
           created_by: user.id,
           // For a PM the database sets assigned_pm to the creator.
           assigned_pm: role === 'pm' ? user.id : assignedPm === '' ? null : assignedPm,
@@ -164,22 +163,6 @@ export function CreateProjectForm({ pmProfiles, onCancel }: CreateProjectFormPro
             >
               <option value="active">Active</option>
               <option value="archived">Archived</option>
-            </select>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="new-project-stage">Stage</Label>
-            <select
-              id="new-project-stage"
-              value={stage}
-              onChange={(e) => setStage(e.target.value as ProjectStage)}
-              className={selectClass}
-            >
-              {PROJECT_STAGES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
             </select>
           </div>
 

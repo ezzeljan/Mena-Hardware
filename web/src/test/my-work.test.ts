@@ -9,7 +9,7 @@ function project(
   opts: {
     pm?: string | null
     estimators?: string[]
-    versions?: Array<{ no: number; status: string; upload?: boolean }>
+    versions?: Array<{ no: number; status: string; upload?: boolean; quote?: string }>
     status?: 'active' | 'archived'
   } = {},
 ): WorkProject {
@@ -22,8 +22,13 @@ function project(
     assigned_pm: opts.pm ?? null,
     updated_at: TS,
     project_estimators: (opts.estimators ?? []).map((estimator_id) => ({ estimator_id })),
+    hardware_quotes: [...new Set((opts.versions ?? []).map((v) => v.quote ?? 'Acme'))].map((b) => ({
+      id: `${id}-${b}`,
+      builder_name: b,
+    })),
     project_versions: (opts.versions ?? []).map((v) => ({
-      id: `${id}-v${v.no}`,
+      id: `${id}-${v.quote ?? 'Acme'}-v${v.no}`,
+      quote_id: `${id}-${v.quote ?? 'Acme'}`,
       version_no: v.no,
       status: v.status as never,
       upload_id: v.upload === false ? null : 'upload',
@@ -64,9 +69,9 @@ describe('buildMyWork', () => {
       project('d', { pm: 'other-pm', versions: [{ no: 1, status: 'submitted' }] }),
     ])
     expect(keys(sections)).toEqual({ review: ['a'], team: ['b'], progress: ['c'] })
-    expect(sections[0].items[0].href).toBe('/projects/a/hardware')
+    expect(sections[0].items[0].href).toBe('/projects/a/hardware?quote=a-Acme')
     expect(sections[0].items[0].label).toBe('A — Project a')
-    expect(sections[0].items[0].versionLabel).toBe('v1 · SUBMITTED')
+    expect(sections[0].items[0].versionLabel).toBe('Acme v1 · SUBMITTED')
   })
 
   it('admin: submitted anywhere, projects without a PM or estimators', () => {
@@ -79,5 +84,26 @@ describe('buildMyWork', () => {
         ]),
       ),
     ).toEqual({ review: ['a'], 'no-pm': ['b'], team: ['c'] })
+  })
+
+  it('lists each builder quote of a project separately', () => {
+    const sections = buildMyWork('estimator', ME, [
+      project('a', {
+        estimators: [ME],
+        versions: [
+          { no: 1, status: 'approved', quote: 'Acme' },
+          { no: 2, status: 'draft', quote: 'Acme' },
+          { no: 1, status: 'submitted', quote: 'Bolt' },
+          { no: 1, status: 'draft', quote: 'Crest' },
+        ],
+      }),
+    ])
+    const drafts = sections.find((s) => s.key === 'drafts')!.items
+    expect(drafts.map((i) => i.versionLabel).sort()).toEqual(['Acme v2 · DRAFT', 'Crest v1 · DRAFT'])
+    expect(new Set(drafts.map((i) => i.key)).size).toBe(2)
+    expect(sections.find((s) => s.key === 'waiting')!.items.map((i) => i.versionLabel)).toEqual([
+      'Bolt v1 · SUBMITTED',
+    ])
+    expect(sections.find((s) => s.key === 'quotation')!.items).toEqual([])
   })
 })

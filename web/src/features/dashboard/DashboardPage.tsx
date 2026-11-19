@@ -34,7 +34,7 @@ function SectionCard({
       ) : (
         <ul className="divide-y divide-neutral-100">
           {section.items.map((it) => (
-            <li key={it.projectId}>
+            <li key={it.key}>
               <Link
                 to={it.href}
                 className="flex items-center justify-between gap-3 px-4 py-2.5 hover:bg-neutral-50"
@@ -91,7 +91,7 @@ export function DashboardPage() {
         supabase
           .from('projects')
           .select(
-            'id, reference_no, name, client, status, assigned_pm, updated_at, project_versions(id, version_no, status, upload_id, updated_at), project_estimators(estimator_id)',
+            'id, reference_no, name, client, status, assigned_pm, updated_at, hardware_quotes(id, builder_name), project_versions(id, quote_id, version_no, status, upload_id, updated_at), project_estimators(estimator_id)',
           )
           .order('id', { ascending: true })
           .range(from, to),

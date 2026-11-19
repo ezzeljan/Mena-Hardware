@@ -28,6 +28,7 @@ function makeLine(overrides: Partial<ProjectLine>): ProjectLine {
   return {
     id: overrides.id ?? 'l1',
     group_id: overrides.group_id ?? 'g1',
+    sheet_id: overrides.sheet_id ?? 's1',
     position: overrides.position ?? 1,
     sku: overrides.sku ?? 'MMHINGE',
     description: overrides.description ?? 'HINGES',

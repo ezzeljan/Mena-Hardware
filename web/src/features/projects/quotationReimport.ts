@@ -1,11 +1,11 @@
-import type { DoorGroup, ProjectLine } from '@/types/database'
+import type { DoorGroup } from '@/types/database'
 import type { ParsedDoorGroupPreview } from '@/features/projects/quotationParser'
 
 /**
  * Re-importing an updated quotation: door groups are matched to the current
  * version by group_key (room | classification | leaf | size). A group whose key
- * is unchanged keeps its set, edited lines, prices and PM remarks; only its door
- * quantity is taken from the new file.
+ * is unchanged keeps its set, every supplier sheet keeps its lines (edits,
+ * prices), and the PM remarks stay; only its door quantity is taken from the new file.
  */
 
 export interface QuotationChanges {
@@ -45,20 +45,4 @@ export function diffQuotationGroups(
 export function customNameFromReason(reason: string | null | undefined): string {
   const m = /^Custom:\s*(.+)$/.exec(reason ?? '')
   return m ? m[1].trim() : ''
-}
-
-/** A kept group's current lines, as sent to the database (positions renumbered 1..n). */
-export function carriedLinesPayload(lines: ProjectLine[]) {
-  return [...lines]
-    .sort((a, b) => a.position - b.position)
-    .map((l, idx) => ({
-      position: idx + 1,
-      sku: l.sku,
-      description: l.description,
-      qty_per_door: l.qty_per_door,
-      unit_price: l.unit_price,
-      origin: l.origin,
-      part_id: l.part_id,
-      mhqt_remarks: l.mhqt_remarks ?? '',
-    }))
 }

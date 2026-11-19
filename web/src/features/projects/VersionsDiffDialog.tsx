@@ -2,10 +2,15 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CopyPlus, GitBranch, GitCompare } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
-import { fetchVersionGroups, fetchVersionLines } from '@/features/projects/projectData'
+import {
+  fetchVersionGroups,
+  fetchVersionLines,
+  fetchVersionSheets,
+} from '@/features/projects/projectData'
 import { useAuth } from '@/features/auth/AuthContext'
 import { formatCurrency } from '@/lib/utils'
 import type {
+  QuoteSheet,
   ApprovalEvent,
   DoorGroup,
   ProjectLine,
@@ -39,16 +44,28 @@ interface VersionsDiffDialogProps {
   selectedVersionId: string | null
   onSelectVersion: (versionId: string) => void
   canEdit: boolean
+  /** Supplier of the sheet open in the grid: the diff compares that supplier's sheets. */
+  activeSupplierId?: string | null
 }
 
 async function fetchVersionSnapshot(versionId: string): Promise<{
   groups: DoorGroup[]
   lines: ProjectLine[]
+  sheets: QuoteSheet[]
 }> {
-  const groups = await fetchVersionGroups(versionId)
-  if (groups.length === 0) return { groups: [], lines: [] }
+  const [groups, sheets] = await Promise.all([
+    fetchVersionGroups(versionId),
+    fetchVersionSheets(versionId),
+  ])
+  if (groups.length === 0) return { groups: [], lines: [], sheets }
   const lines = await fetchVersionLines(versionId)
-  return { groups, lines }
+  return { groups, lines, sheets }
+}
+
+/** Lines of the version's sheet for one supplier (none if it has no such sheet). */
+function supplierLines(snap: { lines: ProjectLine[]; sheets: QuoteSheet[] }, supplierId: string) {
+  const sheet = snap.sheets.find((sh) => sh.supplier_id === supplierId)
+  return sheet ? snap.lines.filter((l) => l.sheet_id === sheet.id) : []
 }
 
 export function VersionsDiffDialog({
@@ -59,6 +76,7 @@ export function VersionsDiffDialog({
   selectedVersionId,
   onSelectVersion,
   canEdit,
+  activeSupplierId = null,
 }: VersionsDiffDialogProps) {
   const { user } = useAuth()
   const queryClient = useQueryClient()
@@ -67,6 +85,8 @@ export function VersionsDiffDialog({
   const [baseId, setBaseId] = useState('')
   const [targetId, setTargetId] = useState('')
   const [showUnchanged, setShowUnchanged] = useState(false)
+  // Supplier whose sheets are compared ('' = the active sheet's supplier).
+  const [diffSupplierId, setDiffSupplierId] = useState('')
   const [actionError, setActionError] = useState<string | null>(null)
 
   const sortedDesc = useMemo(
@@ -74,10 +94,12 @@ export function VersionsDiffDialog({
     [versions],
   )
 
+  // Defaults: latest vs the one before; reset when the versions (quote) change.
   useEffect(() => {
+    const known = (id: string) => sortedDesc.some((v) => v.id === id)
     if (sortedDesc.length >= 2) {
-      setTargetId((prev) => prev || sortedDesc[0].id)
-      setBaseId((prev) => prev || sortedDesc[1].id)
+      setTargetId((prev) => (known(prev) ? prev : sortedDesc[0].id))
+      setBaseId((prev) => (known(prev) ? prev : sortedDesc[1].id))
     } else if (sortedDesc.length === 1) {
       setTargetId(sortedDesc[0].id)
       setBaseId(sortedDesc[0].id)
@@ -85,7 +107,7 @@ export function VersionsDiffDialog({
   }, [sortedDesc])
 
   const eventsQuery = useQuery({
-    queryKey: ['approval_events', projectId],
+    queryKey: ['approval_events', projectId, ...versions.map((v) => v.id)],
     enabled: open && versions.length > 0,
     queryFn: async (): Promise<ApprovalEvent[]> => {
       const { data, error } = await supabase
@@ -101,22 +123,43 @@ export function VersionsDiffDialog({
     },
   })
 
-  const diffQuery = useQuery({
+  const snapshotsQuery = useQuery({
     queryKey: ['version_diff', baseId, targetId],
     enabled: open && tab === 'diff' && Boolean(baseId) && Boolean(targetId),
     queryFn: async () => {
-      const [baseSnap, targetSnap] = await Promise.all([
+      const [base, target] = await Promise.all([
         fetchVersionSnapshot(baseId),
         fetchVersionSnapshot(targetId),
       ])
-      return computeVersionDiff(
-        baseSnap.groups,
-        baseSnap.lines,
-        targetSnap.groups,
-        targetSnap.lines,
-      )
+      return { base, target }
     },
   })
+
+  // Suppliers with a sheet in either version (by name, from the sheets).
+  const diffSuppliers = useMemo(() => {
+    const map = new Map<string, string>()
+    const snaps = snapshotsQuery.data
+    for (const sh of [...(snaps?.target.sheets ?? []), ...(snaps?.base.sheets ?? [])]) {
+      if (!map.has(sh.supplier_id)) map.set(sh.supplier_id, sh.name)
+    }
+    return [...map.entries()].map(([id, name]) => ({ id, name }))
+  }, [snapshotsQuery.data])
+  const comparedSupplierId =
+    diffSuppliers.find((sup) => sup.id === diffSupplierId)?.id ??
+    diffSuppliers.find((sup) => sup.id === activeSupplierId)?.id ??
+    diffSuppliers[0]?.id ??
+    ''
+
+  const diffData = useMemo(() => {
+    const snaps = snapshotsQuery.data
+    if (!snaps) return undefined
+    return computeVersionDiff(
+      snaps.base.groups,
+      supplierLines(snaps.base, comparedSupplierId),
+      snaps.target.groups,
+      supplierLines(snaps.target, comparedSupplierId),
+    )
+  }, [snapshotsQuery.data, comparedSupplierId])
 
   const createDraftMutation = useMutation({
     mutationFn: async (source: ProjectVersion) => {
@@ -320,6 +363,24 @@ export function VersionsDiffDialog({
                   </select>
                 </label>
 
+                {diffSuppliers.length > 1 && (
+                  <label className="flex items-center gap-1.5">
+                    <span className="font-semibold text-neutral-700">Sheet:</span>
+                    <select
+                      value={comparedSupplierId}
+                      onChange={(e) => setDiffSupplierId(e.target.value)}
+                      className="h-8 border border-neutral-300 bg-white px-2 text-xs"
+                      aria-label="Supplier sheet to compare"
+                    >
+                      {diffSuppliers.map((sup) => (
+                        <option key={sup.id} value={sup.id}>
+                          {sup.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
                 <label className="flex items-center gap-1.5">
                   <span className="font-semibold text-neutral-700">Compare:</span>
                   <select
@@ -346,24 +407,24 @@ export function VersionsDiffDialog({
               </label>
             </div>
 
-            {diffQuery.isLoading ? (
+            {snapshotsQuery.isLoading ? (
               <div className="p-6 text-center text-xs text-neutral-600">
                 Computing version diff...
               </div>
-            ) : diffQuery.data ? (
+            ) : diffData ? (
               <>
                 <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
                   <Badge variant="default">
-                    +{diffQuery.data.summary.added} Added
+                    +{diffData.summary.added} Added
                   </Badge>
                   <Badge variant="outline">
-                    -{diffQuery.data.summary.removed} Removed
+                    -{diffData.summary.removed} Removed
                   </Badge>
                   <Badge variant="secondary">
-                    ~{diffQuery.data.summary.changed} Changed
+                    ~{diffData.summary.changed} Changed
                   </Badge>
                   <span className="text-neutral-500 ml-2">
-                    ({diffQuery.data.summary.unchanged} unchanged)
+                    ({diffData.summary.unchanged} unchanged)
                   </span>
                 </div>
 
@@ -380,7 +441,7 @@ export function VersionsDiffDialog({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {diffQuery.data.groups.flatMap((gd) => {
+                      {diffData.groups.flatMap((gd) => {
                         const visibleLines = showUnchanged
                           ? gd.lines
                           : gd.lines.filter((l) => l.kind !== 'unchanged')
@@ -414,9 +475,9 @@ export function VersionsDiffDialog({
                           </TableRow>
                         ))
                       })}
-                      {diffQuery.data.summary.added +
-                        diffQuery.data.summary.removed +
-                        diffQuery.data.summary.changed ===
+                      {diffData.summary.added +
+                        diffData.summary.removed +
+                        diffData.summary.changed ===
                         0 &&
                         !showUnchanged && (
                           <TableRow>

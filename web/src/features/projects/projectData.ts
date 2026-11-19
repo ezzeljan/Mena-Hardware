@@ -1,12 +1,12 @@
 import { supabase } from '@/lib/supabase'
 import { fetchAllRows } from '@/lib/fetchAll'
-import type { DoorGroup, ProjectLine } from '@/types/database'
+import type { DoorGroup, ProjectLine, QuoteSheet } from '@/types/database'
 
 export const DOOR_GROUP_COLUMNS =
   'id, version_id, position, group_key, door_tag, room_name, classification, leaf, door_size, door_qty, matched_set_id, match_status, match_score, match_reason, pm_remarks, created_at, updated_at'
 
 export const PROJECT_LINE_COLUMNS =
-  'id, group_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, created_at, updated_at'
+  'id, group_id, sheet_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, created_at, updated_at'
 
 /** All door groups of a version, ordered by position (paginated past the 1000-row cap). */
 export function fetchVersionGroups(versionId: string): Promise<DoorGroup[]> {
@@ -42,4 +42,18 @@ export async function fetchVersionLines(versionId: string): Promise<ProjectLine[
     delete line.door_groups
     return line as ProjectLine
   })
+}
+
+export const QUOTE_SHEET_COLUMNS = 'id, version_id, supplier_id, name, position, created_at, updated_at'
+
+/** Supplier sheets of a version, in tab order. */
+export async function fetchVersionSheets(versionId: string): Promise<QuoteSheet[]> {
+  const { data, error } = await supabase
+    .from('quote_sheets')
+    .select(QUOTE_SHEET_COLUMNS)
+    .eq('version_id', versionId)
+    .order('position', { ascending: true })
+    .order('created_at', { ascending: true })
+  if (error) throw error
+  return (data ?? []) as QuoteSheet[]
 }

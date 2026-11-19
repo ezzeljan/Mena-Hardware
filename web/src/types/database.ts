@@ -99,6 +99,9 @@ export interface Project {
   status: ProjectStatus
   /** Tender (default) or Awarded; changed by the assigned PM or an admin. */
   stage: ProjectStage
+  /** Winning quote and supplier once Awarded (migration 021); null at Tender. */
+  awarded_quote_id: string | null
+  awarded_supplier_id: string | null
   created_by: string
   assigned_pm: string | null
   created_at: string
@@ -128,9 +131,32 @@ export interface QuotationDoor {
   created_at: string
 }
 
+/** A builder's hardware quote in a project (migration 021). */
+export interface HardwareQuote {
+  id: string
+  project_id: string
+  builder_name: string
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** A supplier sheet of a quote version; each has its own hardware lines (migration 021). */
+export interface QuoteSheet {
+  id: string
+  version_id: string
+  supplier_id: string
+  name: string
+  position: number
+  created_at: string
+  updated_at: string
+}
+
 export interface ProjectVersion {
   id: string
   project_id: string
+  /** The builder quote this version belongs to; version_no counts per quote. */
+  quote_id: string
   version_no: number
   status: VersionStatus
   upload_id: string | null
@@ -164,6 +190,8 @@ export interface DoorGroup {
 export interface ProjectLine {
   id: string
   group_id: string
+  /** The supplier sheet the line is on (migration 021). */
+  sheet_id: string
   position: number
   sku: string
   description: string
@@ -199,12 +227,14 @@ export interface AppNotification {
   created_at: string
 }
 
-/** PM comment on a hardware schedule version (migration 018). */
+/** PM comment on a hardware quote version (migration 018). */
 export interface VersionComment {
   id: string
   version_id: string
-  /** The door group it is about, or null for the whole schedule. */
+  /** The door group it is about, or null for the whole quote. */
   door_group_id: string | null
+  /** The supplier sheet it is about, or null (migration 021). */
+  sheet_id: string | null
   author_id: string | null
   body: string
   created_at: string

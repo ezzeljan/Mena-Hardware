@@ -7,7 +7,7 @@ import { useAuth } from '@/features/auth/AuthContext'
 import { useProfileDirectory } from '@/features/account/useProfileDirectory'
 import { UserAvatar } from '@/components/avatar/UserAvatar'
 import { Button } from '@/components/ui/button'
-import type { DoorGroup, ProjectVersion, VersionComment } from '@/types/database'
+import type { DoorGroup, ProjectVersion, QuoteSheet, VersionComment } from '@/types/database'
 
 const MAX_LENGTH = 2000
 
@@ -22,7 +22,7 @@ export function useVersionComments(versionId: string | undefined) {
     queryFn: async (): Promise<VersionComment[]> => {
       const { data, error } = await supabase
         .from('version_comments')
-        .select('id, version_id, door_group_id, author_id, body, created_at')
+        .select('id, version_id, door_group_id, sheet_id, author_id, body, created_at')
         .eq('version_id', versionId!)
         .order('created_at', { ascending: true })
         .order('id', { ascending: true })
@@ -53,14 +53,24 @@ function timeLabel(iso: string) {
   return sameDay ? `Today ${time}` : `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}, ${time}`
 }
 
-/** "all" = every comment, "general" = whole-schedule comments, otherwise a door group id. */
+/**
+ * "all" = every comment, "general" = comments on the whole quote (no door
+ * group, no sheet), "sheet:<id>" = comments on one supplier sheet, otherwise a
+ * door group id.
+ */
 export type CommentFilter = 'all' | 'general' | string
+
+const SHEET_PREFIX = 'sheet:'
 
 interface VersionCommentsDrawerProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   version: ProjectVersion | null
   groups: DoorGroup[]
+  /** Supplier sheets of the version. */
+  sheets?: Pick<QuoteSheet, 'id' | 'name'>[]
+  /** The sheet open in the grid: new comments point at it by default. */
+  activeSheetId?: string | null
   filter: CommentFilter
   onFilterChange: (filter: CommentFilter) => void
   /** Assigned PM or admin. */
@@ -78,6 +88,8 @@ export function VersionCommentsDrawer({
   onOpenChange,
   version,
   groups,
+  sheets = [],
+  activeSheetId = null,
   filter,
   onFilterChange,
   canComment,
@@ -88,23 +100,34 @@ export function VersionCommentsDrawer({
   const queryClient = useQueryClient()
   const commentsQuery = useVersionComments(version?.id)
   const [body, setBody] = useState('')
+  // '' = the whole quote; otherwise a sheet id.
+  const [postSheetId, setPostSheetId] = useState<string>(activeSheetId ?? '')
   const listEndRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
 
   const groupById = useMemo(() => new Map(groups.map((g) => [g.id, g])), [groups])
+  const sheetById = useMemo(() => new Map(sheets.map((sh) => [sh.id, sh])), [sheets])
+  const filterSheetId = filter.startsWith(SHEET_PREFIX) ? filter.slice(SHEET_PREFIX.length) : null
+  const filterGroupId =
+    filter !== 'all' && filter !== 'general' && !filterSheetId ? filter : null
   const comments = useMemo(() => {
     const all = commentsQuery.data ?? []
     if (filter === 'all') return all
-    if (filter === 'general') return all.filter((c) => !c.door_group_id)
+    if (filter === 'general') return all.filter((c) => !c.door_group_id && !c.sheet_id)
+    if (filterSheetId) return all.filter((c) => c.sheet_id === filterSheetId)
     return all.filter((c) => c.door_group_id === filter)
-  }, [commentsQuery.data, filter])
+  }, [commentsQuery.data, filter, filterSheetId])
 
-  // A filter for a door group that isn't in this version falls back to all.
+  // New comments follow the sheet open in the grid (or the sheet filter).
   useEffect(() => {
-    if (filter !== 'all' && filter !== 'general' && groups.length > 0 && !groupById.has(filter)) {
-      onFilterChange('all')
-    }
-  }, [filter, groupById, groups.length, onFilterChange])
+    setPostSheetId(filterSheetId ?? activeSheetId ?? '')
+  }, [activeSheetId, filterSheetId])
+
+  // A filter for a door group or sheet that isn't in this version falls back to all.
+  useEffect(() => {
+    if (filterGroupId && groups.length > 0 && !groupById.has(filterGroupId)) onFilterChange('all')
+    if (filterSheetId && sheets.length > 0 && !sheetById.has(filterSheetId)) onFilterChange('all')
+  }, [filterGroupId, filterSheetId, groupById, sheetById, groups.length, sheets.length, onFilterChange])
 
   useEffect(() => {
     if (open) listEndRef.current?.scrollIntoView({ block: 'end' })
@@ -116,7 +139,8 @@ export function VersionCommentsDrawer({
       if (!text || !version || !user) return
       const { error } = await supabase.from('version_comments').insert({
         version_id: version.id,
-        door_group_id: filter === 'all' || filter === 'general' ? null : filter,
+        door_group_id: filterGroupId,
+        sheet_id: postSheetId || null,
         author_id: user.id,
         body: text,
       })
@@ -136,12 +160,11 @@ export function VersionCommentsDrawer({
     onSettled: () => queryClient.invalidateQueries({ queryKey: versionCommentsKey(version?.id) }),
   })
 
-  const postTarget =
-    filter === 'all' || filter === 'general'
-      ? 'the whole schedule'
-      : groupById.get(filter)
-        ? groupLabel(groupById.get(filter)!)
-        : 'this door group'
+  const postTarget = filterGroupId
+    ? groupById.get(filterGroupId)
+      ? groupLabel(groupById.get(filterGroupId)!)
+      : 'this door group'
+    : 'the whole quote'
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange} modal={false}>
@@ -184,12 +207,23 @@ export function VersionCommentsDrawer({
               className="h-8 w-full rounded-md border border-neutral-300 bg-white px-2 text-xs text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950"
             >
               <option value="all">All comments</option>
-              <option value="general">Whole schedule</option>
-              {groups.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {groupLabel(g)}
-                </option>
-              ))}
+              <option value="general">Whole quote</option>
+              {sheets.length > 1 && (
+                <optgroup label="Supplier sheets">
+                  {sheets.map((sh) => (
+                    <option key={sh.id} value={SHEET_PREFIX + sh.id}>
+                      {sh.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              <optgroup label="Door groups">
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {groupLabel(g)}
+                  </option>
+                ))}
+              </optgroup>
             </select>
           </div>
 
@@ -211,6 +245,7 @@ export function VersionCommentsDrawer({
                   const author = c.author_id ? byId.get(c.author_id) : undefined
                   const name = author?.full_name?.trim() || 'Project Manager'
                   const group = c.door_group_id ? groupById.get(c.door_group_id) : undefined
+                  const sheet = c.sheet_id ? sheetById.get(c.sheet_id) : undefined
                   const canDelete = !!user && (c.author_id === user.id || isAdmin)
                   return (
                     <li key={c.id} className="group/comment flex gap-2.5" data-testid="comment">
@@ -243,9 +278,17 @@ export function VersionCommentsDrawer({
                             {groupLabel(group)}
                           </button>
                         )}
-                        {!c.door_group_id && filter === 'all' && (
+                        {sheet && (
+                          <span
+                            className="ml-1 mt-1 inline-flex max-w-full truncate rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-800"
+                            data-testid="comment-sheet"
+                          >
+                            Sheet: {sheet.name}
+                          </span>
+                        )}
+                        {!c.door_group_id && !c.sheet_id && filter === 'all' && (
                           <span className="mt-1 inline-flex rounded border border-neutral-200 px-1.5 py-0.5 text-[11px] text-neutral-500">
-                            Whole schedule
+                            Whole quote
                           </span>
                         )}
                         <p className="mt-1.5 whitespace-pre-wrap rounded-md bg-neutral-100 px-3 py-2 text-xs leading-relaxed text-neutral-900">
@@ -268,9 +311,29 @@ export function VersionCommentsDrawer({
                 postMutation.mutate()
               }}
             >
-              <label htmlFor="new-comment" className="block text-[11px] text-neutral-500">
-                Comment on <span className="font-medium text-neutral-800">{postTarget}</span>
-              </label>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-neutral-500">
+                <label htmlFor="new-comment">
+                  Comment on <span className="font-medium text-neutral-800">{postTarget}</span>
+                </label>
+                {sheets.length > 1 && (
+                  <>
+                    <label htmlFor="new-comment-sheet">for</label>
+                    <select
+                      id="new-comment-sheet"
+                      value={postSheetId}
+                      onChange={(e) => setPostSheetId(e.target.value)}
+                      className="h-6 rounded border border-neutral-300 bg-white px-1 text-[11px] text-neutral-900 focus:outline-none focus:ring-1 focus:ring-neutral-950"
+                    >
+                      <option value="">all sheets</option>
+                      {sheets.map((sh) => (
+                        <option key={sh.id} value={sh.id}>
+                          the {sh.name} sheet
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+              </div>
               <textarea
                 id="new-comment"
                 value={body}

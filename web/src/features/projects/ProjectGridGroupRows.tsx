@@ -36,6 +36,8 @@ export const GRID_COLUMNS: { label: string; align?: 'right' | 'center' }[] = [
 export interface LineSupplier {
   name: string
   ownerSupplied: boolean
+  /** The part is from another supplier than the sheet's. */
+  other: boolean
 }
 
 /** One door group in the hardware grid: its header row and its line rows. */
@@ -197,6 +199,15 @@ export function GroupRowsFragment({
             </td>
             <td className={`${CELL} text-xs text-neutral-700 whitespace-nowrap ${addedBg}`}>
               {maker?.name ?? ''}
+              {maker?.other && (
+                <span
+                  className="ml-1.5 rounded border border-amber-300 bg-amber-50 px-1 py-px text-[10px] font-semibold uppercase text-amber-800"
+                  title="This part is from another supplier than the sheet's"
+                  data-testid="other-supplier-badge"
+                >
+                  Other supplier
+                </span>
+              )}
             </td>
             <td className={`border border-neutral-300 p-0 whitespace-nowrap ${addedBg}`}>
               {renderEditableCell(

@@ -15,6 +15,7 @@ import type {
   Part,
   ProjectLine,
   ProjectVersion,
+  QuoteSheet,
 } from '@/types/database'
 import { fetchVersionGroups, fetchVersionLines } from '@/features/projects/projectData'
 import { GridCellEditor } from '@/features/projects/GridCellEditor'
@@ -35,8 +36,13 @@ interface ProjectGridPanelProps {
   projectName: string
   /** Project name without the reference no. ("Project:" row of the export). */
   projectTitle?: string
+  /** The quote's builder ("Client:" row and file name). */
   clientName: string
   activeVersion: ProjectVersion | null
+  /** The supplier sheet shown (its lines only). */
+  sheet: QuoteSheet | null
+  /** Every sheet of the version (the export writes one worksheet each). */
+  sheets?: QuoteSheet[]
   canEdit: boolean
   /** PM comment count per door group (shown on the group rows). */
   commentCounts?: Map<string, number>
@@ -58,6 +64,8 @@ export function ProjectGridPanel({
   projectTitle,
   clientName,
   activeVersion,
+  sheet,
+  sheets = [],
   canEdit,
   commentCounts,
   onOpenComments,
@@ -68,7 +76,10 @@ export function ProjectGridPanel({
   const isDraft = activeVersion?.status === 'draft'
   const editable = canEdit && isDraft
 
+  // Lines of every sheet of the version (edits are saved by line id).
   const [lines, setLines] = useState<ProjectLine[]>([])
+  // Part suggestions: the sheet's supplier only, or every supplier (out of stock).
+  const [allSuppliers, setAllSuppliers] = useState(false)
   const [markupPct, setMarkupPct] = useState<number>(15)
   const [markupInput, setMarkupInput] = useState<string>('15.00')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
@@ -125,6 +136,11 @@ export function ProjectGridPanel({
   })
 
   const parts = useMemo(() => partsQuery.data ?? [], [partsQuery.data])
+  const sheetSupplierId = sheet?.supplier_id ?? null
+  const suggestedParts = useMemo(
+    () => (allSuppliers || !sheetSupplierId ? parts : parts.filter((p) => p.supplier_id === sheetSupplierId)),
+    [allSuppliers, parts, sheetSupplierId],
+  )
   const partLookups = useMemo(
     () => ({
       partById: new Map(parts.map((p) => [p.id, p])),
@@ -254,10 +270,15 @@ export function ProjectGridPanel({
     [flushDirtyLines],
   )
 
+  const sheetLines = useMemo(
+    () => (sheet ? lines.filter((l) => l.sheet_id === sheet.id) : []),
+    [lines, sheet],
+  )
+
   const linesByGroup = useMemo(() => {
     const map = new Map<string, ProjectLine[]>()
     for (const g of groups) map.set(g.id, [])
-    for (const l of lines) {
+    for (const l of sheetLines) {
       const arr = map.get(l.group_id)
       if (arr) arr.push(l)
     }
@@ -265,7 +286,7 @@ export function ProjectGridPanel({
       arr.sort((a, b) => a.position - b.position)
     }
     return map
-  }, [groups, lines])
+  }, [groups, sheetLines])
 
   const flatLineIds = useMemo(() => {
     const ordered: string[] = []
@@ -392,7 +413,7 @@ export function ProjectGridPanel({
   )
 
   const handleAddLine = async (groupId: string) => {
-    if (!editable) return
+    if (!editable || !sheet) return
     setSaveStatus('saving')
     setSaveError(null)
     const groupLines = linesByGroup.get(groupId) ?? []
@@ -405,6 +426,7 @@ export function ProjectGridPanel({
       .from('project_lines')
       .insert({
         group_id: groupId,
+        sheet_id: sheet.id,
         position: nextPos,
         sku: '',
         description: 'New hardware item',
@@ -414,7 +436,7 @@ export function ProjectGridPanel({
         part_id: null,
       })
       .select(
-        'id, group_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, created_at, updated_at',
+        'id, group_id, sheet_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, created_at, updated_at',
       )
       .single()
 
@@ -493,6 +515,12 @@ export function ProjectGridPanel({
     }
   }
 
+  // Switching sheets closes any open cell editor.
+  useEffect(() => {
+    setEditingCell(null)
+    setFocusedCell(null)
+  }, [sheet?.id])
+
   useEffect(() => {
     setEditingCell(null)
     setFocusedCell(null)
@@ -516,7 +544,7 @@ export function ProjectGridPanel({
   const markupFactor = 1 + markupPct / 100
   const totalDoors = groups.reduce((sum, g) => sum + Number(g.door_qty), 0)
   const groupById = new Map(groups.map((g) => [g.id, g]))
-  const projectTotal = lines.reduce((sum, l) => {
+  const projectTotal = sheetLines.reduce((sum, l) => {
     if (l.unit_price === null) return sum
     const dQty = Number(groupById.get(l.group_id)?.door_qty ?? 0)
     return sum + Number(l.qty_per_door) * dQty * Number(l.unit_price)
@@ -530,7 +558,13 @@ export function ProjectGridPanel({
       (line.part_id ? partById.get(line.part_id) : undefined) ??
       partBySku.get(line.sku.trim().toUpperCase())
     const m = part?.suppliers
-    return m ? { name: m.name, ownerSupplied: m.is_owner_supplied } : null
+    return m
+      ? {
+          name: m.name,
+          ownerSupplied: m.is_owner_supplied,
+          other: !!sheetSupplierId && part.supplier_id !== sheetSupplierId,
+        }
+      : null
   }
 
   const renderEditableCell = (
@@ -550,7 +584,8 @@ export function ProjectGridPanel({
           key={`${line.id}:${col}`}
           initialValue={editingCell.initial}
           isSku={col === 0}
-          parts={parts}
+          parts={suggestedParts}
+          showSupplier={allSuppliers}
           alignRight={alignRight}
           onCommit={(value, move) => {
             commitEdit(line, col, value)
@@ -658,6 +693,7 @@ export function ProjectGridPanel({
               </div>
               <div className="text-sm font-bold text-neutral-600">Schedule #:</div>
               <div className="pt-0.5 text-[11px] text-neutral-500">
+                {sheet ? `Sheet: ${sheet.name} • ` : ''}
                 v{activeVersion.version_no} ({activeVersion.status.toUpperCase()})
                 {editable &&
                   ' • Arrow keys move, Enter/F2 edit, Tab next, Esc cancel'}
@@ -665,6 +701,20 @@ export function ProjectGridPanel({
             </div>
 
             <div className="flex items-center gap-4 text-xs">
+              {editable && sheetSupplierId && (
+                <label
+                  className="flex items-center gap-1.5 text-[11px] text-neutral-700 select-none"
+                  title="Part suggestions come from this sheet's supplier. Tick to pick a part from another supplier (e.g. out of stock)."
+                >
+                  <input
+                    type="checkbox"
+                    checked={allSuppliers}
+                    onChange={(e) => setAllSuppliers(e.target.checked)}
+                    data-testid="other-suppliers-toggle"
+                  />
+                  Parts from other suppliers
+                </label>
+              )}
               {editable && (
                 <Badge variant="outline" className="font-mono text-[11px] gap-1.5">
                   {saveStatus === 'saving' && (
@@ -894,6 +944,8 @@ export function ProjectGridPanel({
                 version: { ...activeVersion, markup_pct: markupPct },
                 groups,
                 lines,
+                sheets,
+                quoteName: clientName,
                 parts,
               })
               setExportOpen(false)

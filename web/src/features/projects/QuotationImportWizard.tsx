@@ -24,7 +24,6 @@ import type {
 } from '@/types/database'
 import { fetchVersionGroups, fetchVersionLines } from '@/features/projects/projectData'
 import {
-  carriedLinesPayload,
   customNameFromReason,
   diffQuotationGroups,
 } from '@/features/projects/quotationReimport'
@@ -57,11 +56,18 @@ interface QuotationImportWizardProps {
   onCancel: () => void
   onDone: (versionId: string) => void
   /**
-   * 'reimport': load an updated quotation into a project that already has one.
-   * Door groups that didn't change keep their set, edited lines, prices and PM
-   * remarks; new groups are matched; removed groups are dropped.
+   * 'import': a new builder quote (builderName + the first sheet's supplier).
+   * 'reimport': load an updated quotation into an existing quote. Door groups
+   * that didn't change keep their set, and every supplier sheet keeps its
+   * lines; new groups are matched; removed groups are dropped.
    */
   mode?: 'import' | 'reimport'
+  /** Import only: the builder of the new quote. */
+  builderName?: string
+  /** Import only: supplier of the quote's first sheet. */
+  supplier?: { id: string; name: string } | null
+  /** Re-import only: the quote being re-imported. */
+  quoteId?: string | null
   /** Re-import only: the version the new file is compared with (the draft, or the latest version). */
   baseVersion?: ProjectVersion | null
   /** Re-import only: version number created when baseVersion is not a draft. */
@@ -108,6 +114,9 @@ export function QuotationImportWizard({
   onCancel,
   onDone,
   mode = 'import',
+  builderName = '',
+  supplier = null,
+  quoteId = null,
   baseVersion = null,
   nextVersionNo = 2,
 }: QuotationImportWizardProps) {
@@ -458,6 +467,9 @@ export function QuotationImportWizard({
       if (unmatchedCount > 0 || blankCustomCount > 0) {
         throw new Error('All door groups must be matched or have a custom door group name.')
       }
+      if (isReimport ? !quoteId : !builderName.trim() || !supplier) {
+        throw new Error(isReimport ? 'No quote selected.' : 'Choose the builder and supplier first.')
+      }
 
       // 1. Upload the .xlsx to Storage (path must start with the project id).
       const safeName = uploadedFile.name.replace(/[^a-zA-Z0-9._-]+/g, '_')
@@ -486,7 +498,8 @@ export function QuotationImportWizard({
 
       const groups = draftMatches.map((m) => {
         if (m.carriedFromGroupId) {
-          // Unchanged group: keep its lines (edits and prices) and PM remarks; new door qty.
+          // Unchanged group: every sheet keeps its lines (edits and prices), the
+          // PM remarks stay; new door qty. The database copies the lines.
           const base = baseById.get(m.carriedFromGroupId)
           return {
             position: m.group.position,
@@ -502,7 +515,8 @@ export function QuotationImportWizard({
             match_score: m.matchScore,
             match_reason: m.matchReason,
             pm_remarks: base?.pm_remarks ?? '',
-            lines: carriedLinesPayload(baseLinesByGroup.get(m.carriedFromGroupId) ?? []),
+            carried_from_group_id: m.carriedFromGroupId,
+            lines: [],
           }
         }
         const set = m.matchedSetId ? setById.get(m.matchedSetId) : undefined
@@ -535,17 +549,21 @@ export function QuotationImportWizard({
         }
       })
 
-      const { data: versionId, error: importErr } = await supabase.rpc(
-        isReimport ? 'reimport_quotation' : 'import_quotation',
-        {
-        p_project_id: projectId,
+      const common = {
         p_storage_path: storagePath,
         p_original_filename: uploadedFile.name,
         p_parse_report: parseResult.report,
         p_doors: doors,
-          p_groups: groups,
-        },
-      )
+        p_groups: groups,
+      }
+      const { data: versionId, error: importErr } = isReimport
+        ? await supabase.rpc('reimport_quotation', { p_quote_id: quoteId, ...common })
+        : await supabase.rpc('import_quotation', {
+            p_project_id: projectId,
+            p_builder_name: builderName.trim(),
+            p_supplier_id: supplier!.id,
+            ...common,
+          })
       if (importErr) throw importErr
 
       return versionId as string
@@ -556,6 +574,7 @@ export function QuotationImportWizard({
       // A re-imported draft keeps its id, so its cached groups/lines must refresh.
       await queryClient.invalidateQueries({ queryKey: ['door_groups'] })
       await queryClient.invalidateQueries({ queryKey: ['project_lines'] })
+      await queryClient.invalidateQueries({ queryKey: ['quote_sheets'] })
       onDone(versionId)
     },
     onError: (err: Error) => {
@@ -662,12 +681,12 @@ export function QuotationImportWizard({
           </h2>
           <p className="text-xs text-neutral-600 mt-0.5">
             {isReimport
-              ? `Upload the updated quotation for ${projectName}. Door groups that haven't changed keep their hardware, edits and prices; new groups are matched to standard sets. ${
+              ? `Upload the updated quotation for ${projectName}. Door groups that haven't changed keep their hardware, edits and prices on every supplier sheet; new groups are matched to standard sets. ${
                   replacesDraft
                     ? `This replaces the quotation in draft v${baseVersion?.version_no}.`
                     : `This creates v${nextVersionNo}; v${baseVersion?.version_no} is kept in the history.`
                 }`
-              : `Upload the quotation, review the door-to-set matches, then create version 1 of ${projectName}.`}
+              : `Upload ${builderName.trim() || 'the builder'}'s quotation for ${projectName}, review the door-to-set matches, then create version 1 of the quote. The first supplier sheet is ${supplier?.name ?? '—'}.`}
           </p>
         </div>
         <Button
@@ -1155,9 +1174,16 @@ export function QuotationImportWizard({
                 Project
               </div>
               <div className="text-sm font-bold text-neutral-950">{projectName}</div>
+              {!isReimport && (
+                <div className="text-xs text-neutral-800">
+                  Builder: <span className="font-semibold">{builderName.trim()}</span>
+                  <br />
+                  First sheet: <span className="font-semibold">{supplier?.name}</span>
+                </div>
+              )}
               <div className="text-xs text-neutral-600">
                 {!isReimport
-                  ? 'Creates version 1 (draft) with the matched hardware lines.'
+                  ? 'Creates version 1 (draft) of the quote with the matched hardware lines.'
                   : replacesDraft
                     ? `Replaces the quotation in draft v${baseVersion?.version_no}.`
                     : `Creates v${nextVersionNo} (draft); v${baseVersion?.version_no} is kept in the history.`}

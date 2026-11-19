@@ -5,27 +5,26 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
-  ArrowRight,
   Building2,
   CalendarDays,
   CircleDot,
-  FileSpreadsheet,
   Flag,
   MapPin,
   Pencil,
   Trash2,
-  Upload,
   type LucideIcon,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
-import { fetchAllRows } from '@/lib/fetchAll'
 import { projectDisplayName } from '@/lib/projectName'
 import { projectFormSchema, type ProjectFormValues } from '@/lib/schemas'
-import type { Profile, VersionStatus } from '@/types/database'
+import type { Profile } from '@/types/database'
 import { ProjectActivityPanel } from '@/features/projects/ProjectActivityPanel'
-import { PROJECT_STAGES, StageBadge } from '@/features/projects/ProjectStage'
+import { StageBadge, StageSelect } from '@/features/projects/ProjectStage'
 import { ProjectTeamPanel } from '@/features/projects/ProjectTeamPanel'
 import { QuotationImportWizard } from '@/features/projects/QuotationImportWizard'
+import { HardwareQuotesPanel } from '@/features/projects/HardwareQuotesPanel'
+import { NewQuoteDialog, type NewQuoteChoice } from '@/features/projects/NewQuoteDialog'
+import { useSupplierOptions } from '@/features/projects/useSuppliers'
 import { deleteProjectWithStorage } from '@/features/projects/deleteProject'
 import { useProjectDetail } from '@/features/projects/useProjectDetail'
 import { Badge } from '@/components/ui/badge'
@@ -40,14 +39,6 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-
-const VERSION_STATUS_TEXT: Record<VersionStatus, string> = {
-  draft: 'Draft — being prepared by the estimators',
-  submitted: 'Waiting for PM review',
-  approved: 'Approved',
-  changes_requested: 'Changes requested by the PM',
-  superseded: 'Superseded',
-}
 
 function DetailField({
   label,
@@ -74,9 +65,9 @@ function DetailField({
 }
 
 /**
- * Project overview: details, team, and a summary of the hardware schedule with
- * a button to open it (ProjectHardwarePage). The first quotation upload also
- * starts here.
+ * Project overview: details, team, and the builder quotes with a button to
+ * open each one (ProjectHardwarePage). New quotes (builder, then the quotation
+ * upload) start here.
  */
 export function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -90,15 +81,18 @@ export function ProjectDetailPage() {
     canEditContent,
     canReview,
     canEditInfo,
-    needsQuotation,
-    latestVersion,
+    canAddQuote,
+    quotes,
   } = useProjectDetail(id)
 
   const [editOpen, setEditOpen] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
-  const [importOpen, setImportOpen] = useState(false)
+  // New quote: builder + first supplier (dialog), then the import wizard.
+  const [newQuoteOpen, setNewQuoteOpen] = useState(false)
+  const [newQuote, setNewQuote] = useState<NewQuoteChoice | null>(null)
+  const suppliersQuery = useSupplierOptions(project?.stage === 'awarded')
 
   const form = useForm<ProjectFormValues>({
     resolver: zodResolver(projectFormSchema),
@@ -127,38 +121,6 @@ export function ProjectDetailPage() {
     },
   })
 
-  // Summary of the latest version for the Hardware Schedule card.
-  const summaryVersionId = !needsQuotation ? (latestVersion?.id ?? null) : null
-  const summaryUploadId = !needsQuotation ? (latestVersion?.upload_id ?? null) : null
-  const hardwareSummaryQuery = useQuery({
-    queryKey: ['hardware-summary', summaryVersionId, summaryUploadId],
-    enabled: !!summaryVersionId,
-    queryFn: async () => {
-      const groups = await fetchAllRows<{ door_qty: number }>((from, to) =>
-        supabase
-          .from('door_groups')
-          .select('id, door_qty')
-          .eq('version_id', summaryVersionId!)
-          .order('id', { ascending: true })
-          .range(from, to),
-      )
-      let fileName: string | null = null
-      if (summaryUploadId) {
-        const { data } = await supabase
-          .from('quotation_uploads')
-          .select('original_filename')
-          .eq('id', summaryUploadId)
-          .maybeSingle()
-        fileName = (data as { original_filename: string } | null)?.original_filename ?? null
-      }
-      return {
-        groupCount: groups.length,
-        doorCount: groups.reduce((sum, g) => sum + Number(g.door_qty), 0),
-        fileName,
-      }
-    },
-  })
-
   const updateProjectMutation = useMutation({
     mutationFn: async (values: ProjectFormValues) => {
       if (!id) return
@@ -171,7 +133,6 @@ export function ProjectDetailPage() {
           client: parsed.client,
           site: parsed.site,
           status: parsed.status,
-          stage: parsed.stage,
           assigned_pm: parsed.assigned_pm === '' ? null : parsed.assigned_pm,
         })
         .eq('id', id)
@@ -231,7 +192,17 @@ export function ProjectDetailPage() {
   }
 
   const displayName = projectDisplayName(project)
-  const summary = hardwareSummaryQuery.data
+  const awardedSupplierName =
+    project.stage === 'awarded'
+      ? (suppliersQuery.data?.find((s) => s.id === project.awarded_supplier_id)?.name ?? null)
+      : null
+  const addQuoteHint = !canEditContent
+    ? estimators.length === 0
+      ? 'Waiting for the PM to assign an estimator.'
+      : null
+    : project.stage === 'awarded'
+      ? 'Awarded — no new quotes.'
+      : null
 
   return (
     <div className="space-y-6">
@@ -294,9 +265,17 @@ export function ProjectDetailPage() {
         <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 xl:grid-cols-5">
           <DetailField label="Client" icon={Building2}>{project.client || '—'}</DetailField>
           <DetailField label="Site" icon={MapPin}>{project.site || '—'}</DetailField>
-          {/* Read-only here; changed from the Projects list or Edit Project Info. */}
+          {/* The PM and admins award the project here (choose the winning quote). */}
           <DetailField label="Stage" icon={Flag}>
-            <StageBadge stage={project.stage ?? 'tender'} />
+            {canEditInfo ? (
+              <StageSelect
+                projectId={project.id}
+                stage={project.stage ?? 'tender'}
+                label={`Stage of ${displayName}`}
+              />
+            ) : (
+              <StageBadge stage={project.stage ?? 'tender'} />
+            )}
           </DetailField>
           <DetailField label="Status" icon={CircleDot}>
             {project.status === 'active' ? 'Active' : 'Archived'}
@@ -312,7 +291,7 @@ export function ProjectDetailPage() {
       </div>
 
       {/*
-        Project Team (left) | Hardware Schedule (centre) | Activities (right).
+        Project Team (left) | Hardware Quotes (centre) | Activities (right).
         On medium screens Activities drops below the other two.
       */}
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[max-content_minmax(0,1fr)] xl:grid-cols-[max-content_minmax(0,1fr)_20rem]">
@@ -327,91 +306,44 @@ export function ProjectDetailPage() {
         </div>
 
         <div className="min-w-0">
-          {needsQuotation ? (
-            <div className="border border-dashed border-neutral-300 bg-neutral-50 p-8 text-center space-y-3 flex flex-col items-center justify-center">
-              <div className="text-sm font-medium text-neutral-950">
-                No quotation imported yet
-              </div>
-              <p className="text-xs text-neutral-600">
-                {importOpen && canEditContent
-                  ? 'Importing the quotation below.'
-                  : canEditContent
-                    ? 'Upload the quotation .xlsx and match each door group to a standard hardware set to create version 1.'
-                    : estimators.length === 0
-                      ? 'Waiting for the PM to assign an estimator.'
-                      : 'Waiting for the assigned estimator to upload the quotation and do the matching.'}
-              </p>
-              {canEditContent && !importOpen && (
-                <Button size="sm" onClick={() => setImportOpen(true)}>
-                  <Upload className="h-3.5 w-3.5" />
-                  <span>Upload Quotation</span>
-                </Button>
-              )}
-            </div>
-          ) : (
-            latestVersion && (
-              <div className="border border-neutral-300 bg-white p-4 rounded-md flex flex-col gap-4 2xl:flex-row 2xl:items-start 2xl:justify-between">
-                <div className="space-y-1.5">
-                  <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                    <FileSpreadsheet className="h-3.5 w-3.5" />
-                    <span>Hardware Schedule</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="font-mono font-semibold text-neutral-950">
-                      v{latestVersion.version_no}
-                    </span>
-                    <Badge
-                      variant={latestVersion.status === 'approved' ? 'default' : 'outline'}
-                      className="uppercase tracking-wider text-[10px]"
-                    >
-                      {latestVersion.status.replace('_', ' ')}
-                    </Badge>
-                    <span className="text-neutral-700">{VERSION_STATUS_TEXT[latestVersion.status]}</span>
-                  </div>
-                  <div className="text-xs text-neutral-600">
-                    {summary
-                      ? `${summary.groupCount} door group${summary.groupCount === 1 ? '' : 's'} · ${summary.doorCount} door${summary.doorCount === 1 ? '' : 's'}`
-                      : 'Loading summary...'}
-                    {' · '}
-                    Updated{' '}
-                    {new Date(latestVersion.updated_at).toLocaleDateString(undefined, {
-                      day: 'numeric',
-                      month: 'short',
-                      year: 'numeric',
-                    })}
-                  </div>
-                  {summary?.fileName && (
-                    <div className="text-xs text-neutral-600">
-                      Quotation file: <span className="font-medium text-neutral-900">{summary.fileName}</span>
-                    </div>
-                  )}
-                </div>
-                <Button asChild className="self-start">
-                  <Link to={`/projects/${project.id}/hardware`}>
-                    <span>Open Hardware Schedule</span>
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </Link>
-                </Button>
-              </div>
-            )
-          )}
+          <HardwareQuotesPanel
+            projectId={project.id}
+            quotes={quotes}
+            awardedSupplierName={awardedSupplierName}
+            canAddQuote={canAddQuote && !newQuote}
+            canEditContent={canEditContent}
+            addQuoteHint={newQuote ? 'Importing below.' : addQuoteHint}
+            onNewQuote={() => setNewQuoteOpen(true)}
+          />
         </div>
 
         <ProjectActivityPanel projectId={project.id} className="lg:col-span-2 xl:col-span-1" />
       </div>
 
       {/* The import wizard needs the full page width */}
-      {needsQuotation && importOpen && canEditContent && (
+      {newQuote && canEditContent && (
         <QuotationImportWizard
           projectId={project.id}
           projectName={displayName}
-          onCancel={() => setImportOpen(false)}
-          onDone={() => {
-            setImportOpen(false)
-            navigate(`/projects/${project.id}/hardware`)
+          builderName={newQuote.builderName}
+          supplier={newQuote.supplier}
+          onCancel={() => setNewQuote(null)}
+          onDone={(versionId) => {
+            setNewQuote(null)
+            navigate(`/projects/${project.id}/hardware?version=${versionId}`)
           }}
         />
       )}
+
+      <NewQuoteDialog
+        open={newQuoteOpen}
+        onOpenChange={setNewQuoteOpen}
+        existingBuilders={quotes.map((q) => q.builder_name)}
+        onConfirm={(choice) => {
+          setNewQuoteOpen(false)
+          setNewQuote(choice)
+        }}
+      />
 
       {/* Edit Project Modal */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
@@ -420,8 +352,8 @@ export function ProjectDetailPage() {
             <DialogTitle>Edit Project Info</DialogTitle>
             <DialogDescription>
               {isAdmin
-                ? 'Update project details, status, stage, or assigned PM.'
-                : 'Update project details, status, or stage.'}
+                ? 'Update project details, status, or assigned PM. The stage is changed from the Stage pill.'
+                : 'Update project details or status. The stage is changed from the Stage pill.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -484,21 +416,6 @@ export function ProjectDetailPage() {
                 </select>
               </div>
 
-              <div className="space-y-1.5">
-                <Label htmlFor="edit-project-stage">Stage</Label>
-                <select
-                  id="edit-project-stage"
-                  {...form.register('stage')}
-                  className="flex h-9 w-full rounded-md border border-neutral-300 bg-white px-3 py-1 text-sm text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950"
-                >
-                  {PROJECT_STAGES.map((s) => (
-                    <option key={s.value} value={s.value}>
-                      {s.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
               {isAdmin && (
                 <div className="space-y-1.5">
                   <Label htmlFor="edit-project-pm">Assigned PM</Label>
@@ -548,7 +465,7 @@ export function ProjectDetailPage() {
           <DialogHeader>
             <DialogTitle>Delete Project</DialogTitle>
             <DialogDescription>
-              Permanently delete <strong>{displayName}</strong> and all of its versions, uploaded quotations, door groups, and hardware lines? This cannot be undone.
+              Permanently delete <strong>{displayName}</strong> and all of its quotes, versions, uploaded quotations, door groups, and hardware lines? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
 
