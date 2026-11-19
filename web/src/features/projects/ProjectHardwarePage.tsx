@@ -1,6 +1,7 @@
-import { useCallback, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, GitBranch, Upload } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { ArrowLeft, GitBranch, MessageSquare, Upload } from 'lucide-react'
 import { projectDisplayName } from '@/lib/projectName'
 import { ProjectGridPanel } from '@/features/projects/ProjectGridPanel'
 import { VersionsDiffDialog } from '@/features/projects/VersionsDiffDialog'
@@ -8,6 +9,13 @@ import { ApprovalBar } from '@/features/projects/ApprovalBar'
 import { QuotationImportWizard } from '@/features/projects/QuotationImportWizard'
 import { canReviseFrom } from '@/features/projects/versionActions'
 import { useProjectDetail } from '@/features/projects/useProjectDetail'
+import { fetchVersionGroups } from '@/features/projects/projectData'
+import {
+  VersionCommentsDrawer,
+  commentCountsByGroup,
+  useVersionComments,
+  type CommentFilter,
+} from '@/features/projects/VersionCommentsDrawer'
 import { Button } from '@/components/ui/button'
 
 /**
@@ -21,7 +29,6 @@ export function ProjectHardwarePage() {
     projectQuery,
     project,
     versions,
-    isProjectPm,
     canEditContent,
     canReview,
     needsQuotation,
@@ -32,6 +39,28 @@ export function ProjectHardwarePage() {
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
   const [reimportOpen, setReimportOpen] = useState(false)
   const [reimportError, setReimportError] = useState<string | null>(null)
+  // PM comments drawer (?comments=open&version=… opens it, e.g. from a notification).
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [commentsOpen, setCommentsOpen] = useState(searchParams.get('comments') === 'open')
+  const [commentFilter, setCommentFilter] = useState<CommentFilter>('all')
+  const [highlightGroupId, setHighlightGroupId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (searchParams.get('comments') !== 'open') return
+    setCommentsOpen(true)
+    const linkedVersion = searchParams.get('version')
+    if (linkedVersion) setSelectedVersionId(linkedVersion)
+    const next = new URLSearchParams(searchParams)
+    next.delete('comments')
+    next.delete('version')
+    setSearchParams(next, { replace: true })
+  }, [searchParams, setSearchParams])
+
+  useEffect(() => {
+    if (!highlightGroupId) return
+    const timer = setTimeout(() => setHighlightGroupId(null), 2500)
+    return () => clearTimeout(timer)
+  }, [highlightGroupId])
 
   // The grid registers a "save pending edits now" function; Submit and
   // Re-import wait on it (B6).
@@ -43,6 +72,20 @@ export function ProjectHardwarePage() {
     () => (savePendingRef.current ? savePendingRef.current() : Promise.resolve(true)),
     [],
   )
+
+  const activeVersion =
+    versions.find((v) => v.id === selectedVersionId) ?? draftVersion ?? versions[0] ?? null
+
+  // PM comments on the selected version (hooks stay above the early returns).
+  const commentsQuery = useVersionComments(activeVersion?.id)
+  const commentCounts = commentCountsByGroup(commentsQuery.data)
+  const commentTotal = commentsQuery.data?.length ?? 0
+  // Same query as the grid's, so this shares its cache.
+  const groupsQuery = useQuery({
+    queryKey: ['door_groups', activeVersion?.id],
+    enabled: !!activeVersion?.id,
+    queryFn: () => fetchVersionGroups(activeVersion!.id),
+  })
 
   const backToOverview = (
     <Button variant="outline" size="sm" asChild>
@@ -98,9 +141,6 @@ export function ProjectHardwarePage() {
     )
   }
 
-  const activeVersion =
-    versions.find((v) => v.id === selectedVersionId) ?? draftVersion ?? versions[0] ?? null
-
   // Re-import: into the draft if there is one, otherwise as the next revision
   // of an approved / changes-requested latest version. Not while under review.
   const reimportBase = draftVersion ?? versions[0] ?? null
@@ -110,6 +150,11 @@ export function ProjectHardwarePage() {
     !versions.some((v) => v.status === 'submitted') &&
     reimportBase !== null &&
     (reimportBase.status === 'draft' || canReviseFrom(reimportBase.status))
+
+  const openComments = (filter: CommentFilter = 'all') => {
+    setCommentFilter(filter)
+    setCommentsOpen(true)
+  }
 
   const openReimport = async () => {
     setReimportError(null)
@@ -134,7 +179,7 @@ export function ProjectHardwarePage() {
           </h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
           <select
             aria-label="Select project version"
             value={activeVersion?.id ?? ''}
@@ -151,11 +196,32 @@ export function ProjectHardwarePage() {
             <GitBranch className="h-3.5 w-3.5" />
             <span>Versions &amp; Diff ({versions.length})</span>
           </Button>
+          <Button
+            variant={commentsOpen ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => (commentsOpen ? setCommentsOpen(false) : openComments())}
+            aria-pressed={commentsOpen}
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+            <span>PM Comments ({commentTotal})</span>
+          </Button>
           {canReimport && !reimportOpen && (
             <Button variant="outline" size="sm" onClick={() => void openReimport()}>
               <Upload className="h-3.5 w-3.5" />
               <span>Re-import Quotation</span>
             </Button>
+          )}
+          {!reimportOpen && (
+            // Version status note + Submit / Approve / Request Changes / New Draft.
+            <ApprovalBar
+              projectId={project.id}
+              versions={versions}
+              activeVersion={activeVersion}
+              onVersionCreated={(vid) => setSelectedVersionId(vid)}
+              canEditContent={canEditContent}
+              canReview={canReview}
+              savePendingEdits={savePendingEdits}
+            />
           )}
         </div>
       </div>
@@ -184,26 +250,30 @@ export function ProjectHardwarePage() {
             </div>
           )}
 
-          <ApprovalBar
-            projectId={project.id}
-            versions={versions}
-            activeVersion={activeVersion}
-            onVersionCreated={(vid) => setSelectedVersionId(vid)}
-            canEditContent={canEditContent}
-            canReview={canReview}
-            savePendingEdits={savePendingEdits}
-          />
-
           <ProjectGridPanel
             projectName={displayName}
-            builderName={project.client}
+            projectTitle={project.name}
+            clientName={project.client}
             activeVersion={activeVersion}
             canEdit={canEditContent}
-            canEditPmRemarks={isProjectPm}
+            commentCounts={commentCounts}
+            onOpenComments={(groupId) => openComments(groupId)}
+            highlightGroupId={highlightGroupId}
             onRegisterSavePending={registerSavePending}
           />
         </>
       )}
+
+      <VersionCommentsDrawer
+        open={commentsOpen}
+        onOpenChange={setCommentsOpen}
+        version={activeVersion}
+        groups={groupsQuery.data ?? []}
+        filter={commentFilter}
+        onFilterChange={setCommentFilter}
+        canComment={canReview}
+        onShowGroup={(groupId) => setHighlightGroupId(groupId)}
+      />
 
       <VersionsDiffDialog
         open={versionsOpen}

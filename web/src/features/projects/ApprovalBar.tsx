@@ -15,7 +15,8 @@ import {
   createNewDraftRevision,
   transitionVersion,
 } from '@/features/projects/versionActions'
-import { Badge } from '@/components/ui/badge'
+import { UserAvatar } from '@/components/avatar/UserAvatar'
+import { useProfileDirectory } from '@/features/account/useProfileDirectory'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -46,6 +47,11 @@ interface ApprovalBarProps {
 
 type ModalMode = 'submit' | 'approve' | 'reject' | null
 
+/**
+ * The version workflow controls, rendered inline in the hardware page's
+ * toolbar row: a short status note (with the latest reviewer comment) and the
+ * Submit / Approve / Request Changes / New Draft buttons, plus their dialog.
+ */
 export function ApprovalBar({
   projectId,
   versions,
@@ -61,6 +67,7 @@ export function ApprovalBar({
   const [modalMode, setModalMode] = useState<ModalMode>(null)
   const [comment, setComment] = useState('')
   const [actionError, setActionError] = useState<string | null>(null)
+  const directory = useProfileDirectory()
 
   const latestEventQuery = useQuery({
     queryKey: ['approval_events', 'latest', activeVersion?.id],
@@ -141,6 +148,24 @@ export function ApprovalBar({
   const hasDraft = versions.some((v) => v.status === 'draft')
   const latestEvent = latestEventQuery.data
 
+  const actor = latestEvent && activeVersion.status !== 'draft' ? directory.byId.get(latestEvent.actor) : undefined
+  const actorLine = latestEvent
+    ? `${actor?.full_name || 'Someone'} ${
+        latestEvent.action === 'submit' ? 'submitted' : latestEvent.action === 'approve' ? 'approved' : 'requested changes'
+      } · ${new Date(latestEvent.created_at).toLocaleString()}`
+    : ''
+  const statusNote =
+    activeVersion.status === 'submitted'
+      ? 'Awaiting PM review'
+      : activeVersion.status === 'approved' && latestEvent?.comment
+        ? `Approved — "${latestEvent.comment}"`
+        : activeVersion.status === 'changes_requested'
+          ? latestEvent?.comment
+            ? `Changes requested: "${latestEvent.comment}"`
+            : 'Changes requested'
+          : ''
+  const statusTitle = [statusNote, actorLine].filter(Boolean).join('\n')
+
   const openModal = (mode: Exclude<ModalMode, null>) => {
     setActionError(null)
     setComment('')
@@ -149,116 +174,65 @@ export function ApprovalBar({
 
   return (
     <>
-      <div className="border border-neutral-300 bg-neutral-50 px-4 py-3 rounded-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-start gap-2.5 text-xs">
-          {activeVersion.status === 'draft' && (
-            <Send className="h-4 w-4 text-neutral-700 shrink-0 mt-0.5" />
+      {/* Inline in the hardware page's toolbar row: a short status note and the actions. */}
+      {statusNote && (
+        <span
+          className="inline-flex h-8 max-w-[20rem] items-center gap-1.5 rounded-md border border-neutral-200 bg-neutral-50 px-2 text-xs text-neutral-700"
+          title={statusTitle}
+          data-testid="version-status-note"
+        >
+          {activeVersion.status === 'submitted' && <Clock className="h-3.5 w-3.5 shrink-0 text-neutral-600" />}
+          {activeVersion.status === 'approved' && <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-700" />}
+          {activeVersion.status === 'changes_requested' && (
+            <MessageSquareWarning className="h-3.5 w-3.5 shrink-0 text-amber-700" />
           )}
-          {activeVersion.status === 'submitted' && (
-            <Clock className="h-4 w-4 text-neutral-700 shrink-0 mt-0.5" />
-          )}
-          {activeVersion.status === 'approved' && (
-            <CheckCircle2 className="h-4 w-4 text-neutral-950 shrink-0 mt-0.5" />
-          )}
-          {(activeVersion.status === 'changes_requested' ||
-            activeVersion.status === 'superseded') && (
-            <MessageSquareWarning className="h-4 w-4 text-neutral-800 shrink-0 mt-0.5" />
-          )}
+          {actor && <UserAvatar name={actor.full_name} url={actor.avatar_url} size="xs" />}
+          <span className="truncate">{statusNote}</span>
+        </span>
+      )}
 
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-neutral-950">
-                Version v{activeVersion.version_no}
-              </span>
-              <Badge
-                variant={activeVersion.status === 'approved' ? 'default' : 'outline'}
-                className="uppercase tracking-wider text-[10px]"
-              >
-                {activeVersion.status.replace('_', ' ')}
-              </Badge>
-            </div>
-            <div className="text-neutral-600 mt-0.5">
-              {activeVersion.status === 'draft' &&
-                'Editable draft. Submit for PM approval when hardware lines and pricing are ready.'}
-              {activeVersion.status === 'submitted' &&
-                `Locked and awaiting PM review${
-                  activeVersion.submitted_at
-                    ? ` (submitted ${new Date(activeVersion.submitted_at).toLocaleString()})`
-                    : ''
-                }.`}
-              {activeVersion.status === 'approved' &&
-                (latestEvent?.comment
-                  ? `Approved — "${latestEvent.comment}"`
-                  : 'Approved and locked.')}
-              {activeVersion.status === 'changes_requested' &&
-                (latestEvent?.comment
-                  ? `Changes requested: "${latestEvent.comment}"`
-                  : 'Changes requested by PM. Create a new draft revision to update.')}
-              {activeVersion.status === 'superseded' &&
-                'Superseded by a newer version (read-only).'}
-            </div>
-          </div>
-        </div>
+      {activeVersion.status === 'draft' && canEditContent && (
+        <Button type="button" size="sm" onClick={() => openModal('submit')}>
+          <Send className="h-3.5 w-3.5" />
+          <span>Submit for Approval</span>
+        </Button>
+      )}
 
-        <div className="flex flex-wrap items-center gap-2">
-          {activeVersion.status === 'draft' && canEditContent && (
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => openModal('submit')}
-            >
-              <Send className="h-3.5 w-3.5" />
-              <span>Submit for Approval</span>
-            </Button>
-          )}
+      {activeVersion.status === 'submitted' && canReview && (
+        <>
+          <Button type="button" size="sm" variant="outline" onClick={() => openModal('reject')}>
+            <MessageSquareWarning className="h-3.5 w-3.5" />
+            <span>Request Changes</span>
+          </Button>
+          <Button type="button" size="sm" onClick={() => openModal('approve')}>
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            <span>Approve</span>
+          </Button>
+        </>
+      )}
 
-          {activeVersion.status === 'submitted' && canReview && (
-            <>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => openModal('reject')}
-              >
-                <MessageSquareWarning className="h-3.5 w-3.5" />
-                <span>Request Changes</span>
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => openModal('approve')}
-              >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                <span>Approve</span>
-              </Button>
-            </>
-          )}
-
-          {canReviseFrom(activeVersion.status) &&
-            canEditContent &&
-            !hasDraft && (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={newDraftMutation.isPending}
-                onClick={() => newDraftMutation.mutate()}
-              >
-                <CopyPlus className="h-3.5 w-3.5" />
-                <span>
-                  {newDraftMutation.isPending
-                    ? 'Creating Draft...'
-                    : `New Draft (v${Math.max(0, ...versions.map((v) => v.version_no)) + 1})`}
-                </span>
-              </Button>
-            )}
-        </div>
-      </div>
+      {canReviseFrom(activeVersion.status) && canEditContent && !hasDraft && (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={newDraftMutation.isPending}
+          onClick={() => newDraftMutation.mutate()}
+        >
+          <CopyPlus className="h-3.5 w-3.5" />
+          <span>
+            {newDraftMutation.isPending
+              ? 'Creating Draft...'
+              : `New Draft (v${Math.max(0, ...versions.map((v) => v.version_no)) + 1})`}
+          </span>
+        </Button>
+      )}
 
       {actionError && !modalMode && (
+        // basis-full: wraps onto its own line below the toolbar buttons.
         <div
           role="alert"
-          className="border border-neutral-950 bg-neutral-50 p-3 text-xs text-neutral-950"
+          className="basis-full border border-neutral-950 bg-neutral-50 p-3 text-xs text-neutral-950"
         >
           {actionError}
         </div>
