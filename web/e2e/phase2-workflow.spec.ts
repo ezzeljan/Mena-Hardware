@@ -152,6 +152,11 @@ interface MockState {
   doorGroups: Row[]
   lines: Row[]
   events: Row[]
+  notifications: Row[]
+  activity: Row[]
+  comments: Row[]
+  lastProfileUpdate?: Row
+  lastProjectUpdate?: Row
   lastReimport?: { p_groups: Array<Row & { lines: Row[] }> }
 }
 
@@ -166,7 +171,7 @@ const wantsSingle = (route: Route) =>
  * `seed` pre-populates state (e.g. an existing project with assigned estimators).
  */
 async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {}) {
-  const me = USERS[role]
+  const me = { ...USERS[role] }
   const state: MockState = {
     project: null,
     versions: [],
@@ -174,6 +179,9 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
     doorGroups: [],
     lines: [],
     events: [],
+    notifications: [],
+    activity: [],
+    comments: [],
     ...seed,
   }
 
@@ -195,6 +203,42 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
     return json(route, route.request().url().includes('role=in.') ? [profile] : profile)
   })
   await page.route('**/rest/v1/profile_directory**', (route) => json(route, DIRECTORY))
+  await page.route('**/rest/v1/notifications**', async (route) => {
+    if (route.request().method() === 'PATCH') {
+      const patch = route.request().postDataJSON() as Row
+      const url = decodeURIComponent(route.request().url())
+      for (const n of state.notifications) {
+        if (url.includes('read_at=is.null') ? !n.read_at : url.includes(String(n.id))) {
+          Object.assign(n, patch)
+        }
+      }
+      return json(route, [])
+    }
+    return json(route, state.notifications)
+  })
+  await page.route('**/rest/v1/project_activity**', (route) => {
+    const url = decodeURIComponent(route.request().url())
+    const inList = url.match(/category=in\.\(([^)]*)\)/)
+    const categories = inList ? inList[1].split(',') : null
+    const rows = state.activity
+      .filter((a) => !categories || categories.includes(String(a.category)))
+      .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+    return json(route, rows)
+  })
+  await page.route('**/rest/v1/version_comments**', (route) => {
+    const method = route.request().method()
+    if (method === 'POST') {
+      const payload = route.request().postDataJSON() as Row
+      state.comments.push({ id: `comment-${state.comments.length + 1}`, created_at: new Date().toISOString(), ...payload })
+      return json(route, {}, 201)
+    }
+    if (method === 'DELETE') {
+      const id = decodeURIComponent(route.request().url()).match(/id=eq\.([^&]+)/)?.[1]
+      state.comments = state.comments.filter((c) => c.id !== id)
+      return json(route, {})
+    }
+    return json(route, state.comments)
+  })
   await page.route('**/rest/v1/manufacturers**', (route) =>
     json(route, [{ ...manufacturer, created_at: TS, updated_at: TS }]),
   )
@@ -215,6 +259,7 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
         client: payload.client ?? '',
         site: payload.site ?? '',
         status: payload.status ?? 'active',
+        stage: payload.stage ?? 'tender',
         created_by: me.id,
         // Mirrors the assign_creating_pm trigger: a PM creator becomes the project's PM.
         assigned_pm: role === 'pm' ? me.id : (payload.assigned_pm ?? null),
@@ -231,6 +276,12 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
         project_estimators: state.estimators,
       }
       return json(route, wantsSingle(route) ? full : [full])
+    }
+    if (method === 'PATCH' && state.project) {
+      const payload = route.request().postDataJSON() as Row
+      state.project = { ...state.project, ...payload }
+      state.lastProjectUpdate = payload
+      return json(route, wantsSingle(route) ? state.project : [state.project])
     }
     return json(route, {})
   })
@@ -364,6 +415,13 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
     return json(route, VERSION_ID)
   })
 
+  await page.route('**/rest/v1/rpc/update_my_profile', async (route) => {
+    const body = route.request().postDataJSON() as Row
+    state.lastProfileUpdate = body
+    me.full_name = String(body.p_full_name)
+    return json(route, null)
+  })
+
   await page.route('**/rest/v1/rpc/reimport_quotation', async (route) => {
     const body = route.request().postDataJSON() as { p_groups: Array<Row & { lines: Row[] }> }
     state.lastReimport = body
@@ -455,7 +513,10 @@ async function signIn(page: Page, role: Role) {
   await page.getByLabel('Email').fill(USERS[role].email)
   await page.getByLabel('Password').fill('password123')
   await page.getByRole('button', { name: 'Sign In' }).click()
-  await expect(page.getByRole('heading', { name: 'Parts Library' })).toBeVisible()
+  // The Dashboard greets the user by first name.
+  await expect(
+    page.getByRole('heading', { name: `Hi ${USERS[role].full_name.split(' ')[0]}!` }),
+  ).toBeVisible()
 }
 
 async function createProjectViaForm(page: Page) {
@@ -465,7 +526,7 @@ async function createProjectViaForm(page: Page) {
 
   await page.getByLabel('Reference No.').fill('SV999')
   await page.getByLabel('Project Name *').fill('E2E Test Tower')
-  await page.getByLabel('Builder').fill('Mena Builders')
+  await page.getByLabel('Client').fill('Mena Builders')
   await page.getByLabel('Site').fill('Sydney CBD')
   // Details only: the form must not ask for a quotation file.
   await expect(page.locator('input[type="file"]')).toHaveCount(0)
@@ -508,7 +569,7 @@ async function submitForApproval(page: Page) {
   await page.getByRole('button', { name: 'Submit for Approval' }).click()
   await page.getByLabel('Comment (Optional)').fill('Ready for PM review')
   await page.getByRole('button', { name: 'Confirm Submit' }).click()
-  await expect(page.getByText(/Locked and awaiting PM review/)).toBeVisible()
+  await expect(page.getByText(/Awaiting PM review/)).toBeVisible()
 }
 
 const existingProject = (assignedPm: string | null): Row => ({
@@ -518,6 +579,7 @@ const existingProject = (assignedPm: string | null): Row => ({
   client: 'Mena Builders',
   site: 'Sydney CBD',
   status: 'active',
+  stage: 'tender',
   created_by: PM_ID,
   assigned_pm: assignedPm,
   created_at: TS,
@@ -617,7 +679,7 @@ test('Other PM can view a project but cannot approve or manage its team', async 
   // Hardware page: can view, cannot approve.
   await page.getByRole('link', { name: 'Open Hardware Schedule' }).click()
   await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/hardware$`))
-  await expect(page.getByText(/Locked and awaiting PM review/)).toBeVisible()
+  await expect(page.getByText(/Awaiting PM review/)).toBeVisible()
   await expect(page.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Request Changes' })).toHaveCount(0)
 })
@@ -641,8 +703,17 @@ test('Admin: create project -> import quotation -> submit -> approve -> export E
   await page.getByRole('button', { name: 'Confirm Approve' }).click()
   await expect(page.getByText('Approved — "Approved for procurement"')).toBeVisible()
 
-  const downloadPromise = page.waitForEvent('download')
+  // Export asks for the Schedule # first (required), picked on the calendar.
   await page.getByRole('button', { name: 'Export Excel' }).click()
+  await page.getByRole('button', { name: 'Download' }).click()
+  await expect(page.getByText('Pick the schedule date to export.')).toBeVisible()
+  const now = new Date()
+  // The calendar opens on the current month; pick the 15th (day buttons carry data-day="M/D/YYYY").
+  const scheduleNo = `${now.getMonth() + 1}/15/${now.getFullYear()}`
+  await page.locator(`[data-day="${scheduleNo}"]`).first().click()
+  await expect(page.getByTestId('export-schedule-value')).toHaveText(scheduleNo)
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Download' }).click()
   const download = await downloadPromise
   expect(download.suggestedFilename()).toBe('SV999_E2E_Test_Tower-v1.xlsx')
 
@@ -652,12 +723,26 @@ test('Admin: create project -> import quotation -> submit -> approve -> export E
   await exportedWb.xlsx.readFile(filePath!)
   const hwSheet = exportedWb.getWorksheet('HARDWARE')
   expect(hwSheet).toBeDefined()
-  expect(hwSheet!.getCell('H3').value).toBe(5) // OVERALL DOOR QTY: 2 + 3
-  expect(hwSheet!.getCell('A5').value).toBe('FIRE EGRESS - BASEMENT')
-  expect(hwSheet!.getCell('B5').value).toBe('DR-001')
+  // Header rows 1-4 (NOVAS Template layout)
+  expect(hwSheet!.getCell('A1').value).toBe('NOVAS HARDWARE - SATIN STAINLESS STEEL')
+  expect(hwSheet!.getCell('A2').value).toBe('Project:')
+  expect(hwSheet!.getCell('B2').value).toBe('E2E TEST TOWER')
+  expect(hwSheet!.getCell('A3').value).toBe('Client:')
+  expect(hwSheet!.getCell('B3').value).toBe('MENA BUILDERS')
+  expect(hwSheet!.getCell('A4').value).toBe('Schedule #:')
+  // The schedule date is a real Excel date.
+  expect(hwSheet!.getCell('B4').value).toEqual(new Date(Date.UTC(now.getFullYear(), now.getMonth(), 15)))
+  expect((hwSheet!.getCell('E4').value as { result: number }).result).toBe(5) // OVERALL DOOR QTY: 2 + 3
+  expect(hwSheet!.getCell('M5').value).toBe('MHQT  REMARKS')
+  expect(hwSheet!.getCell('A6').value).toBe('FIRE EGRESS - BASEMENT')
+  expect(hwSheet!.getCell('D6').value).toBe('DOOR QTY:')
+  // Line 1 of group 1 is the owner-supplied MM hinge
+  expect(hwSheet!.getCell('A7').value).toBe('MM')
+  expect(hwSheet!.getCell('B7').value).toBe('MM')
+  expect(hwSheet!.getCell('C7').value).toBe('MMHINGE')
   // Line 2 of group 1 is 505BC+SLC; its missing unit price stays empty
-  expect(hwSheet!.getCell('F7').value).toBe('505BC+SLC')
-  expect(hwSheet!.getCell('I7').value).toBeNull()
+  expect(hwSheet!.getCell('C8').value).toBe('505BC+SLC')
+  expect(hwSheet!.getCell('F8').value).toBeNull()
 })
 
 test('Assigned estimator re-imports an updated quotation: unchanged groups keep their edits', async ({
@@ -740,4 +825,279 @@ test('Assigned estimator re-imports an updated quotation: unchanged groups keep 
   ])
   const bath = groups.find((g) => g.group_key !== fireKey)!
   expect(bath.lines).toEqual([expect.objectContaining({ sku: 'MMHINGE', origin: 'set' })])
+})
+
+test('PM home: Dashboard lists the version to review; the bell opens it and marks it read', async ({
+  page,
+}) => {
+  const state = await mockSupabase(page, 'pm', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+    versions: [
+      {
+        id: VERSION_ID, project_id: PROJECT_ID, version_no: 1, status: 'submitted',
+        upload_id: UPLOAD_ID, markup_pct: 12, created_by: ESTIMATOR_ID,
+        submitted_at: '2026-11-18T01:00:00Z', created_at: TS, updated_at: TS,
+      },
+    ],
+    notifications: [
+      {
+        id: 'notif-1', user_id: PM_ID, project_id: PROJECT_ID, version_id: VERSION_ID,
+        kind: 'submitted', title: `v1 of ${PROJECT_NAME} is waiting for your review`,
+        body: 'Erin Estimator submitted it.', actor_id: ESTIMATOR_ID, read_at: null,
+        created_at: new Date().toISOString(),
+      },
+    ],
+  })
+  await signIn(page, 'pm')
+
+  // Dashboard: the submitted version is in the review queue.
+  const review = page.locator('section', { has: page.getByRole('heading', { name: 'Waiting for your review' }) })
+  await expect(review.getByRole('link', { name: new RegExp(PROJECT_NAME) })).toBeVisible()
+  await expect(review.getByText('v1 · SUBMITTED')).toBeVisible()
+
+  // Bell: one unread; opening it goes to the hardware page and marks it read.
+  await expect(page.getByTestId('notification-count')).toHaveText('1')
+  await page.getByRole('button', { name: /Notifications/ }).click()
+  await page.getByRole('button', { name: new RegExp('waiting for your review') }).click()
+  await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/hardware$`))
+  await expect.poll(() => state.notifications[0].read_at).not.toBeNull()
+  await expect(page.getByTestId('notification-count')).toHaveCount(0)
+})
+
+test('Account page: user renames themselves; the header menu shows the new name', async ({
+  page,
+}) => {
+  const state = await mockSupabase(page, 'estimator')
+  await signIn(page, 'estimator')
+
+  await page.getByRole('button', { name: 'Account menu' }).click()
+  await expect(page.getByTestId('header-user-name')).toHaveText('Erin Estimator')
+  await page.getByRole('menuitem', { name: 'My Account' }).click()
+  await expect(page.getByRole('heading', { name: 'My Account' })).toBeVisible()
+
+  // No photo yet: initials, and an Upload Photo button.
+  await expect(page.getByRole('button', { name: 'Upload Photo' })).toBeVisible()
+
+  await page.getByLabel('Full Name').fill('Erin Tan')
+  await page.getByRole('button', { name: 'Save Name' }).click()
+  await expect(page.getByText('Name saved.')).toBeVisible()
+  expect(state.lastProfileUpdate).toEqual({ p_full_name: 'Erin Tan', p_avatar_url: null })
+
+  await page.getByRole('button', { name: 'Account menu' }).click()
+  await expect(page.getByTestId('header-user-name')).toHaveText('Erin Tan')
+})
+
+test('Project overview: Activities lists who did what and when, with filters', async ({ page }) => {
+  const now = Date.now()
+  const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString()
+  const entry = (id: string, minutesAgo: number, row: Row) => ({
+    id, project_id: PROJECT_ID, version_id: null, details: {},
+    created_at: at(minutesAgo), updated_at: at(minutesAgo), ...row,
+  })
+  await mockSupabase(page, 'pm', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+    versions: [
+      {
+        id: VERSION_ID, project_id: PROJECT_ID, version_no: 1, status: 'changes_requested',
+        upload_id: UPLOAD_ID, markup_pct: 12, created_by: ESTIMATOR_ID,
+        submitted_at: at(30), created_at: TS, updated_at: at(5),
+      },
+    ],
+    activity: [
+      entry('act-1', 120, {
+        actor_id: ADMIN_ID, category: 'project', action: 'project_created', summary: 'created the project',
+      }),
+      entry('act-2', 110, {
+        actor_id: PM_ID, category: 'team', action: 'estimator_added',
+        summary: 'added Erin Estimator as an estimator',
+      }),
+      entry('act-3', 60, {
+        actor_id: ESTIMATOR_ID, category: 'quotation', action: 'quotation_imported',
+        summary: 'imported the quotation (v1)', version_id: VERSION_ID,
+        details: { file: 'quotation.xlsx', door_groups: 2, version_no: 1 },
+      }),
+      entry('act-4', 40, {
+        actor_id: ESTIMATOR_ID, category: 'hardware', action: 'lines_edited',
+        summary: 'updated hardware lines in v1', version_id: VERSION_ID,
+        details: { version_no: 1, edited: 3, added: 0, removed: 0 },
+      }),
+      entry('act-5', 5, {
+        actor_id: PM_ID, category: 'version', action: 'version_changes_requested',
+        summary: 'requested changes on v1', version_id: VERSION_ID,
+        details: { version_no: 1, comment: 'Check the closers', from: 'submitted', to: 'changes_requested' },
+      }),
+    ],
+  })
+  await signIn(page, 'pm')
+  await page.goto(`/projects/${PROJECT_ID}`)
+
+  const panel = page.getByTestId('project-activity')
+  await expect(panel.getByRole('heading', { name: 'Activities' })).toBeVisible()
+  await expect(panel.getByTestId('activity-entry')).toHaveCount(5)
+  await expect(panel.getByText('Today')).toBeVisible()
+
+  // Newest first, with the actor, the change, status chips and the comment.
+  const newest = panel.getByTestId('activity-entry').first()
+  await expect(newest).toContainText('Pat PM')
+  await expect(newest).toContainText('requested changes on v1')
+  await expect(newest).toContainText('Changes requested')
+  await expect(newest).toContainText('“Check the closers”')
+  await newest.getByRole('button', { name: 'Hide' }).click()
+  await expect(newest).not.toContainText('Check the closers')
+
+  // Filters.
+  await panel.getByRole('tab', { name: 'Hardware edits' }).click()
+  await expect(panel.getByTestId('activity-entry')).toHaveCount(1)
+  await expect(panel.getByTestId('activity-entry').first()).toContainText('3 changes')
+
+  await panel.getByRole('tab', { name: 'Project & Team' }).click()
+  await expect(panel.getByTestId('activity-entry')).toHaveCount(2)
+  await expect(panel).toContainText('Admin User')
+  await expect(panel).toContainText('added Erin Estimator as an estimator')
+})
+
+test('Projects list: the assigned PM changes the stage; an estimator only sees it', async ({ page }) => {
+  const state = await mockSupabase(page, 'pm', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'pm')
+  await page.goto('/projects')
+
+  await expect(page.getByRole('columnheader', { name: 'Stage' })).toBeVisible()
+  const stage = page.getByRole('button', { name: 'Stage of SV999 — E2E Test Tower' })
+  await expect(stage).toHaveText('Tender')
+  await stage.click()
+  await page.getByRole('option', { name: 'Awarded' }).click()
+  await expect.poll(() => state.lastProjectUpdate).toEqual({ stage: 'awarded' })
+  await expect(stage).toHaveText('Awarded')
+  await expect(page.getByRole('listbox')).toHaveCount(0)
+
+  // Stage filter.
+  await page.getByLabel('Filter by project stage').selectOption('tender')
+  await expect(page.getByText('No projects found.')).toBeVisible()
+  await page.getByLabel('Filter by project stage').selectOption('awarded')
+  await expect(page.getByRole('link', { name: 'E2E Test Tower' })).toBeVisible()
+})
+
+test('Projects list: an estimator sees the stage but cannot change it', async ({ page }) => {
+  await mockSupabase(page, 'estimator', {
+    project: { ...existingProject(PM_ID), stage: 'awarded' },
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'estimator')
+  await page.goto('/projects')
+
+  await expect(page.getByTestId('project-stage')).toHaveText('Awarded')
+  await expect(page.getByTestId('project-stage-select')).toHaveCount(0)
+})
+
+const COMMENT_SEED = (status: string) => ({
+  project: existingProject(PM_ID),
+  estimators: [assignedEstimator(PM_ID)],
+  versions: [
+    {
+      id: VERSION_ID, project_id: PROJECT_ID, version_no: 1, status,
+      upload_id: UPLOAD_ID, markup_pct: 15, created_by: ESTIMATOR_ID,
+      submitted_at: TS, created_at: TS, updated_at: TS,
+    },
+  ],
+  doorGroups: [
+    {
+      id: 'group-c-1', version_id: VERSION_ID, position: 1, group_key: 'C1',
+      door_tag: 'DR-001', room_name: 'LOBBY', classification: 'NON RATED',
+      leaf: 'SINGLE', door_size: '2040x920', door_qty: 2,
+      matched_set_id: null, match_status: 'manual', match_score: 0, match_reason: '',
+      pm_remarks: '', created_at: TS, updated_at: TS,
+    },
+  ],
+  lines: [
+    {
+      id: 'pline-c-1', group_id: 'group-c-1', position: 1, sku: 'MMHINGE',
+      description: 'HINGES 100X100 4BB BLACK', qty_per_door: 3, unit_price: 4, origin: 'set',
+      part_id: null, created_at: TS, updated_at: TS,
+    },
+  ],
+})
+
+test('Hardware: the PM comments in the drawer (no PM REMARKS column)', async ({ page }) => {
+  const state = await mockSupabase(page, 'pm', COMMENT_SEED('submitted'))
+  await signIn(page, 'pm')
+  await page.goto(`/projects/${PROJECT_ID}/hardware`)
+
+  await expect(page.getByText('LOBBY')).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'PM REMARKS' })).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'PM Comments (0)' }).click()
+  const drawer = page.getByTestId('comments-drawer')
+  await expect(drawer.getByText('No comments yet. Add the first one below.')).toBeVisible()
+
+  // Comment on the LOBBY door group.
+  await drawer.getByLabel('Show comments for').selectOption({ label: 'LOBBY · DR-001' })
+  await expect(drawer.getByText('Comment on')).toContainText('LOBBY · DR-001')
+  await drawer.getByPlaceholder('Write a comment for the estimators...').fill('Use satin hinges here')
+  await drawer.getByRole('button', { name: 'Post comment' }).click()
+
+  await expect.poll(() => state.comments.length).toBe(1)
+  expect(state.comments[0]).toMatchObject({
+    version_id: VERSION_ID, door_group_id: 'group-c-1', author_id: PM_ID, body: 'Use satin hinges here',
+  })
+  await expect(drawer.getByTestId('comment')).toHaveCount(1)
+  await expect(page.getByRole('button', { name: 'PM Comments (1)' })).toBeVisible()
+  // The door group row shows the count.
+  await expect(page.getByRole('button', { name: '1 PM comment on LOBBY' })).toBeVisible()
+})
+
+test('Hardware: the estimator reads PM comments but cannot post', async ({ page }) => {
+  await mockSupabase(page, 'estimator', {
+    ...COMMENT_SEED('changes_requested'),
+    comments: [
+      {
+        id: 'comment-1', version_id: VERSION_ID, door_group_id: 'group-c-1', author_id: PM_ID,
+        body: 'Closer missing on this door', created_at: TS,
+      },
+    ],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/hardware`)
+
+  await page.getByRole('button', { name: '1 PM comment on LOBBY' }).click()
+  const drawer = page.getByTestId('comments-drawer')
+  await expect(drawer.getByTestId('comment')).toHaveCount(1)
+  await expect(drawer).toContainText('Closer missing on this door')
+  await expect(drawer).toContainText('Pat PM')
+  await expect(drawer.getByRole('button', { name: 'Post comment' })).toHaveCount(0)
+  await expect(drawer.getByRole('button', { name: 'Delete comment' })).toHaveCount(0)
+})
+
+test('Hardware grid: NOVAS Template columns and editable MHQT remarks', async ({ page }) => {
+  const state = await mockSupabase(page, 'estimator', COMMENT_SEED('draft'))
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/hardware`)
+
+  for (const header of [
+    'LEGEND', 'MANUFACTURER', 'COST DOOR', 'PRICE DOOR', 'HW PRICE PER DOOR TYPE',
+    'OVERALL HW PRICE PER TYPICAL DOOR', 'TOTAL ITEMS PER TYPICAL DOOR', 'MHQT REMARKS',
+  ]) {
+    await expect(page.getByRole('columnheader', { name: header, exact: true })).toBeVisible()
+  }
+  await expect(page.getByRole('columnheader', { name: 'COST + MARKUP' })).toHaveCount(0)
+
+  // MMHINGE is an owner-supplied MM part: 3 per door × $4, 2 doors, 15% markup.
+  const hingeRow = page.getByRole('row').filter({ hasText: 'MMHINGE' })
+  await expect(hingeRow).toContainText('MM')
+  await expect(hingeRow).toContainText('12.00') // cost door
+  await expect(hingeRow).toContainText('4.60') // price
+  await expect(hingeRow).toContainText('13.80') // price door
+  // 2 doors × $13.80 + $3.00 deliveries
+  await expect(page.getByTestId('grid-total-ex-gst')).toContainText('30.60')
+
+  // Edit the remarks cell (last editable column) and save.
+  await hingeRow.locator('td').nth(17).locator('div[tabindex]').dblclick()
+  await page.keyboard.type('Supply only')
+  await page.keyboard.press('Enter')
+  await expect.poll(() => state.lines.find((l) => l.id === 'pline-c-1')?.mhqt_remarks).toBe('Supply only')
+  await expect(hingeRow).toContainText('Supply only')
 })

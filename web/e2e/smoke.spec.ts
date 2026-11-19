@@ -121,7 +121,9 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
   await page.getByLabel('Password').fill('password123')
   await page.getByRole('button', { name: 'Sign In' }).click()
 
-  // 3. Verify Parts Library opens with parts and the "No unit price" marker
+  // 3. Sign-in lands on the Dashboard; open the Parts Library and check the parts and the "No unit price" marker
+  await expect(page.getByRole('heading', { name: 'Hi Admin!' })).toBeVisible()
+  await page.getByRole('link', { name: 'Parts Library' }).click()
   await expect(page.getByRole('heading', { name: 'Parts Library' })).toBeVisible()
   await expect(page.getByText('6125SSS')).toBeVisible()
   await expect(page.getByText('505BC+SLC')).toBeVisible()

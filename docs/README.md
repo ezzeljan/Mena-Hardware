@@ -38,13 +38,23 @@ Web application for the Mena Contractors door hardware team. Replaces manual Exc
 │   │   ├── 20261118000010_project_team_roles.sql              # PM-created projects, project_estimators, per-project RLS
 │   │   ├── 20261118000011_atomic_version_functions.sql        # transition_version, create_revision, import_quotation, save_project_lines
 │   │   ├── 20261118000012_reimport_quotation.sql              # reimport_quotation (updated quotation into draft / next revision)
-│   │   └── 20261118000013_project_reference_no.sql            # projects.reference_no (split from "SV002 — Name")
+│   │   ├── 20261118000013_project_reference_no.sql            # projects.reference_no (split from "SV002 — Name")
+│   │   ├── 20261118000014_notifications.sql                   # in-app notifications (assignment, submit, approve, changes requested)
+│   │   ├── 20261118000015_profile_avatars.sql                 # profiles.avatar_url, avatars bucket, update_my_profile()
+│   │   ├── 20261118000016_project_activity.sql                # project activity log (triggers + backfill of past history)
+│   │   ├── 20261119000017_project_stage.sql                   # projects.stage: Tender (default) / Awarded
+│   │   ├── 20261119000018_version_comments.sql                # PM comments on a version (replaces the PM REMARKS column)
+│   │   └── 20261119000019_line_mhqt_remarks.sql               # project_lines.mhqt_remarks (MHQT REMARKS column)
 │   ├── seed/
 │   │   ├── parser.ts                               # Workbook parser, manufacturer classifier & data issues report
 │   │   └── seed.ts                                 # Idempotent direct-Postgres seed script (--dry-run, --prune)
 │   └── tests/
 │       ├── rls_policies.test.sql                   # Phase 1 SQL tests (roles, RLS, price history)
 │       ├── phase2_rls.test.sql                     # Phase 2 SQL tests (projects, version locking, approvals, PM remarks)
+│       ├── activity.test.sql                       # Project activity log SQL tests
+│       ├── project_stage.test.sql                  # Project stage SQL tests
+│       ├── version_comments.test.sql               # PM comment SQL tests
+│       ├── line_remarks.test.sql                   # MHQT remarks SQL tests
 │       └── run-sql-tests.ts                        # Runner for the SQL test suite
 └── web/
     ├── .env.example                                # Public VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY
@@ -78,7 +88,8 @@ Project access is per project: the **project's PM** is `projects.assigned_pm` (s
 | Create new draft revision (`vN+1`) from locked version | ✓ | assigned | | |
 | Re-import an updated quotation (into the draft, or as `vN+1`) | ✓ | assigned | | |
 | Approve or request changes on `submitted` version | ✓ | | own projects | |
-| Edit `pm_remarks` on a `submitted` version | | | own projects | |
+| Post PM comments on a version (any status); delete own | ✓ | | own projects | |
+| Read PM comments | ✓ | assigned | ✓ | ✓ |
 | Export project version to Excel (`.xlsx`) | ✓ | assigned | ✓ | ✓ |
 
 ---
@@ -89,6 +100,7 @@ Project access is per project: the **project's PM** is `projects.assigned_pm` (s
    - Enter Reference No. (`projects.reference_no`), name, builder, and site. A PM who creates a project becomes its PM automatically.
    - The project overview (`/projects/:id`, `ProjectDetailPage`) shows the details, the team and a Hardware Schedule summary with an **Open Hardware Schedule** button. The grid, versions, re-import, approvals and export are on `/projects/:id/hardware` (`ProjectHardwarePage`).
    - On the overview, the PM assigns one or more estimators (`ProjectTeamPanel`). Estimators only see projects they are assigned to.
+   - **Stage:** every project is at **Tender** (the default) or **Awarded** (`projects.stage`, migration 017). The Projects list has a Stage column and a stage filter; the overview shows the stage in the details row. The project's assigned PM and admins change it from the dropdown in either place, in **Edit Project Info**, or when creating the project; everyone else sees a read-only badge. Changes appear in the project's Activities.
 1b. **Upload Quotation (assigned estimator or admin, `QuotationImportWizard`):**
    - Drop a Mena quotation `.xlsx` workbook; `quotationParser.ts` detects the Door Schedule sheet, filters excluded rows (`Ex.`, `EXCLUDED`, `BY OTHERS`), extracts `door_tag` (`Door Type`), normalizes fire rating (`FIRE RATED` / `NON RATED`), leaf configuration (`SINGLE`, `DOUBLE`, `CAVITY SINGLE`, etc.), and dimensions, and groups matching doors. Parsing runs in a Web Worker (`quotationParser.worker.ts`, falls back to the main thread). Finishing the import creates version 1 in one call (`import_quotation`).
    - **Re-import Quotation** (hardware page) loads an updated file: door groups whose key (door tag, room, classification, leaf, size) is unchanged keep their set, edited lines, prices and PM remarks (door quantity comes from the new file); new groups are matched; removed groups are dropped. It replaces the draft's quotation, or creates `vN+1` after approval / changes requested; refused while a version is submitted.
@@ -96,13 +108,26 @@ Project access is per project: the **project's PM** is `projects.assigned_pm` (s
    - Rules-based matching engine scores each door group against the 65 Standard Hardware Sets using classification/leaf filters, room-name token overlap + synonym expansion, and door size similarity.
    - Estimators can bulk-confirm auto-matches scoring ≥ 72%; lower-confidence matches must be confirmed one by one (or changed). They can also pick an alternate Standard Set or define a custom door group.
 3. **Excel-Style Project Grid (`ProjectGridPanel`):**
-   - Single connected 12-column table (`ROOM NAME`, `DOOR TAG`, `DOOR DESCRIPTION`, `CLASSIFICATION`, `DOOR SIZE`, `HARDWARE CODE`, `HARDWARE DESCRIPTION`, `QTY`, `UNIT COST`, `TOTAL COST`, `COST + MARKUP`, `PM REMARKS`) with keyboard navigation (`Arrow` keys, `Enter`/`F2` to edit, `Tab`, `Esc`), SKU autocomplete from the Parts Library, autosave status indicator, and preserved `NULL` unit prices (`No unit price` marker — never defaulted to `0`).
+   - Single connected table with the door details (`ROOM NAME`, `DOOR TAG`, `DOOR SIZE`, `DOOR CLASSIFICATION`, `LEAFS`) followed by the NOVAS Template columns (`LEGEND`, `MANUFACTURER`, `PART NUMBER`, `DESCRIPTION`, `QTY`, `COST`, `COST DOOR`, `PRICE`, `PRICE DOOR`, `HW PRICE PER DOOR TYPE`, `OVERALL HW PRICE PER TYPICAL DOOR`, `TOTAL ITEMS PER TYPICAL DOOR`, `MHQT REMARKS`), computed with the same formulas as the export. SKU, description, qty, cost and MHQT remarks are editable (remarks: `project_lines.mhqt_remarks`, migration 019, up to 500 characters, copied into revisions and kept on re-import). The strip above shows markup, overall door qty, total cost, total + markup, deliveries ($1.5 per door) and TOTAL EX. GST, with keyboard navigation (`Arrow` keys, `Enter`/`F2` to edit, `Tab`, `Esc`), SKU autocomplete from the Parts Library, autosave status indicator, and preserved `NULL` unit prices (`No unit price` marker — never defaulted to `0`).
 4. **Versions, Diff & Approval (`ApprovalBar`, `VersionsDiffDialog`):**
    - Submitting a draft first saves any pending grid edits, then locks `door_groups` and `project_lines` via database triggers.
-   - PMs review `submitted` versions, add `PM REMARKS`, and either **Approve** or **Request Changes** (comment required).
+   - PMs review `submitted` versions, leave **PM Comments**, and either **Approve** or **Request Changes** (comment required).
+   - **PM Comments** (`VersionCommentsDrawer`, migration 018) replace the old PM REMARKS column: a right-hand drawer on the hardware page (**PM Comments (n)** button), non-modal so the grid stays usable. The assigned PM or an admin posts comments on the selected version, either on the whole schedule or on one door group; everyone on the project reads them. Door groups with comments show a count badge in the grid that opens the drawer on that group, and a group chip in a comment scrolls the grid to it. Authors (and admins) can delete comments; comments are not editable. Each comment is logged in the Activities and notifies the project's estimators (the notification opens the drawer). Existing PM remarks were copied in as comments.
    - Creating a new draft revision (`vN+1`) clones all groups and lines from `vN` and marks older versions `superseded`. Any two versions can be compared in the Diff modal (added, removed, and changed lines).
-5. **Excel Export (`projectExcelExport.ts`):**
-   - Downloads a styled `.xlsx` (`HARDWARE` worksheet) with live Excel formulas (`=I*H` line totals, `=SUM(...)` group/overall totals, `=J*(1+$I$2)` markup totals) and visual indicators for added/edited lines while keeping blank (`null`) unit prices blank (highlighted, with a cell note; the grand total notes how many lines were excluded).
+5. **Dashboard & Notifications (`DashboardPage`, `NotificationBell`):**
+   - After sign-in users land on the **Dashboard** (`/dashboard`), which groups their active projects by what needs doing: estimators see changes requested, quotations to upload, drafts and versions waiting for review; PMs see versions waiting for their review, projects needing estimators and work in progress; admins see submitted versions, projects without a PM and projects without estimators.
+   - The header bell shows in-app notifications (refreshed every 30 s), created by database triggers when someone is assigned to a project, a PM is set, a version is submitted (to the project's PM, or the admins if there is none), or a version is approved / sent back (to the estimators). Nobody is notified about their own action.
+6. **Account & Avatars (`AccountPage`, `UserAvatar`):**
+   - The header avatar opens a menu with **My Account** and **Sign out**. On `/account` users change their photo (cropped to a centred square and resized to 256×256 in the browser, stored in the public `avatars` bucket under `<user id>/`), their full name (`update_my_profile()`), and their password. Email and role stay admin-managed.
+   - Avatars (photo, or initials) appear in the header, `/users` (where admins can also rename users; only the user can change their own photo), the project team panel, the projects list and the Dashboard (team column), notifications and the approval bar.
+7. **Project Activity (`ProjectActivityPanel`):**
+   - The **Activities** panel (right of the hardware schedule on the project overview; the team is on the left): a timeline of project creation, detail edits (old → new), PM and estimator changes, quotation imports and re-imports, new revisions, submit / approve / request changes (with the comment), markup and PM remark changes, and hardware line edits (grouped per person per version within 30 minutes, with counts). Each entry shows who did it, the date and the time. Filters: All · Project & Team · Quotation & Versions · Hardware edits; 30 at a time with **Show more**; refreshed every 30 s.
+   - Entries are written only by database triggers (`project_activity`, migration 016), so clients cannot add, change or delete them; anyone who can view the project can read them. Migration 016 rebuilds past history from existing data (creation, estimator assignments, uploads, revisions and approval events); older detail edits and line edits were never recorded, so they cannot be shown.
+8. **Excel Export (`projectExcelExport.ts`):**
+   - Follows Mena's final **NOVAS Template**. Before exporting, the user picks the **Schedule #** date on a calendar with month/year dropdowns (`components/shadcn-space/calendar/calendar-05.tsx`) and can adjust the sheet title (default "NOVAS HARDWARE - SATIN STAINLESS STEEL"). The hardware grid shows the same Project / Client / Schedule # rows (schedule left blank).
+   - Rows 1–4: title (A1, merged to L1), `Project:` / `Client:` / `Schedule #:` with values in B2–B4 (the schedule as a real Excel date, `mm-dd-yy`), **MARKUP** (F3, from the version's markup), total before markup and margin (G3 `=K3/(1+F3)`, G4 `=K3-G3`), **OVERALL DOOR QTY** (E4, `SUMIF` over the "DOOR QTY:" rows), **DELIVERIES** (K4 `=E4*1.5`) and **TOTAL EX. GST** (K3 `=SUM(K4:K…)`, incl. deliveries).
+   - Row 5 columns: LEGEND, MANUFACTURER, PART NUMBER, DESCRIPTION, QTY, Cost, Cost Door, Price, Price Door, Hardware Price per Door Type, Overall HW Price per Typical Door, Total Items per Typical Door, MHQT REMARKS (each line's remarks from the grid; PM comments are not exported). Each door group is a grey row (room, door tag, leaf + classification, `DOOR QTY:`, door qty, `SUM` totals, `J=I`, `K=E*I`) followed by its lines (`G=IFERROR(E*F,"")`, `H=F*(1+$F$3)`, `I=E*H`, `L=E*door qty`). Manufacturer comes from the line's library part; LEGEND shows "MM" for owner-supplied parts (other legend codes are not stored).
+   - Lines with no unit price keep their price cells blank (highlighted, with a note; the total notes how many were excluded). Lines added to the standard set are green.
 
 ---
 
@@ -148,7 +173,7 @@ npm install
   npx supabase db push
   ```
 - **Option B — Using Direct Postgres / SQL Editor:**
-  Run all SQL files in [`supabase/migrations/`](../supabase/migrations/) in chronological order (`20261116000001` through `20261118000013`).
+  Run all SQL files in [`supabase/migrations/`](../supabase/migrations/) in chronological order (`20261116000001` through `20261119000019`).
 
 ### Step 4: Seed the 65 Standard Sets & Parts Library
 
