@@ -24,7 +24,7 @@ export interface QuoteDetail extends HardwareQuote {
 }
 
 export const PROJECT_DETAIL_COLUMNS =
-  'id, reference_no, name, client, site, status, stage, awarded_quote_id, awarded_supplier_id, created_by, assigned_pm, created_at, updated_at, hardware_quotes(id, project_id, builder_name, created_by, created_at, updated_at), project_versions(id, project_id, quote_id, version_no, status, upload_id, markup_pct, created_by, submitted_at, created_at, updated_at), project_estimators(project_id, estimator_id, assigned_by, created_at)'
+  'id, reference_no, name, client, site, status, stage, awarded_quote_id, awarded_supplier_id, created_by, assigned_pm, created_at, updated_at, hardware_quotes!hardware_quotes_project_id_fkey(id, project_id, builder_name, created_by, created_at, updated_at), project_versions(id, project_id, quote_id, version_no, status, upload_id, markup_pct, created_by, submitted_at, created_at, updated_at), project_estimators(project_id, estimator_id, assigned_by, created_at)'
 
 /**
  * Loads a project with its builder quotes, versions and estimators, and works

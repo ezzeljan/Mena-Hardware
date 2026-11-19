@@ -91,7 +91,7 @@ export function DashboardPage() {
         supabase
           .from('projects')
           .select(
-            'id, reference_no, name, client, status, assigned_pm, updated_at, hardware_quotes(id, builder_name), project_versions(id, quote_id, version_no, status, upload_id, updated_at), project_estimators(estimator_id)',
+            'id, reference_no, name, client, status, assigned_pm, updated_at, hardware_quotes!hardware_quotes_project_id_fkey(id, builder_name), project_versions(id, quote_id, version_no, status, upload_id, updated_at), project_estimators(estimator_id)',
           )
           .order('id', { ascending: true })
           .range(from, to),

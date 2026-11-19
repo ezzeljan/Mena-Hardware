@@ -55,7 +55,7 @@ export function ProjectsPage() {
       const { data, error } = await supabase
         .from('projects')
         .select(
-          'id, reference_no, name, client, site, status, stage, created_by, assigned_pm, created_at, updated_at, awarded_quote_id, awarded_supplier_id, hardware_quotes(id, builder_name), project_versions(id, quote_id, version_no, status), project_estimators(estimator_id)',
+          'id, reference_no, name, client, site, status, stage, created_by, assigned_pm, created_at, updated_at, awarded_quote_id, awarded_supplier_id, hardware_quotes!hardware_quotes_project_id_fkey(id, builder_name), project_versions(id, quote_id, version_no, status), project_estimators(estimator_id)',
         )
         .order('updated_at', { ascending: false })
       if (error) throw error
