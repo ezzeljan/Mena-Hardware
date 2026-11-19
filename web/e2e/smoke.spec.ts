@@ -50,7 +50,7 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
     })
   })
 
-  await page.route('**/rest/v1/manufacturers**', async (route) => {
+  await page.route('**/rest/v1/suppliers**', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -81,13 +81,13 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
         {
           id: '44444444-4444-4444-4444-444444444444',
           sku: '6125SSS',
-          manufacturer_id: '33333333-3333-3333-3333-333333333333',
+          supplier_id: '33333333-3333-3333-3333-333333333333',
           description: 'NOVAS 6000 SERIES VESTIBULE LOCK 60MM BACKSET SSS',
           unit_cost: 54,
           active: true,
           created_at: '2026-11-16T00:00:00Z',
           updated_at: '2026-11-16T00:00:00Z',
-          manufacturers: {
+          suppliers: {
             id: '33333333-3333-3333-3333-333333333333',
             name: 'NOVAS',
             is_owner_supplied: false,
@@ -96,13 +96,13 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
         {
           id: '55555555-5555-5555-5555-555555555555',
           sku: '505BC+SLC',
-          manufacturer_id: '22222222-2222-2222-2222-222222222222',
+          supplier_id: '22222222-2222-2222-2222-222222222222',
           description: 'SLIDING ARM DOOR CLOSER',
           unit_cost: null,
           active: true,
           created_at: '2026-11-16T00:00:00Z',
           updated_at: '2026-11-16T00:00:00Z',
-          manufacturers: {
+          suppliers: {
             id: '22222222-2222-2222-2222-222222222222',
             name: 'MM',
             is_owner_supplied: true,

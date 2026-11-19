@@ -100,7 +100,7 @@ export function StandardSetDetailPage() {
         supabase
           .from('parts')
           .select(
-            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
+            'id, sku, supplier_id, description, unit_cost, active, created_at, updated_at',
           )
           .order('sku', { ascending: true })
           .order('id', { ascending: true })

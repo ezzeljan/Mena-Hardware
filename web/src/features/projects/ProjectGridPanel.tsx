@@ -24,7 +24,7 @@ import {
   GroupRowsFragment,
   LAST_EDITABLE_COL,
   type EditableCol,
-  type LineManufacturer,
+  type LineSupplier,
 } from '@/features/projects/ProjectGridGroupRows'
 import { DELIVERY_PER_DOOR } from '@/features/projects/pricing'
 import { Badge } from '@/components/ui/badge'
@@ -115,7 +115,7 @@ export function ProjectGridPanel({
         supabase
           .from('parts')
           .select(
-            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at, manufacturers(id, name, is_owner_supplied)',
+            'id, sku, supplier_id, description, unit_cost, active, created_at, updated_at, suppliers(id, name, is_owner_supplied)',
           )
           .eq('active', true)
           .order('sku', { ascending: true })
@@ -507,7 +507,7 @@ export function ProjectGridPanel({
     }
   }, [activeVersion])
 
-  // LEGEND / MANUFACTURER columns: from the line's library part (by id, else SKU).
+  // LEGEND / SUPPLIER columns: from the line's library part (by id, else SKU).
   // Built once per parts load (hooks must stay above the early return).
   const { partById, partBySku } = partLookups
 
@@ -525,11 +525,11 @@ export function ProjectGridPanel({
   const deliveries = totalDoors * DELIVERY_PER_DOOR
   const totalExGst = projectTotalWithMarkup + deliveries
 
-  const manufacturerOf = (line: ProjectLine): LineManufacturer | null => {
+  const supplierOf = (line: ProjectLine): LineSupplier | null => {
     const part =
       (line.part_id ? partById.get(line.part_id) : undefined) ??
       partBySku.get(line.sku.trim().toUpperCase())
-    const m = part?.manufacturers
+    const m = part?.suppliers
     return m ? { name: m.name, ownerSupplied: m.is_owner_supplied } : null
   }
 
@@ -851,7 +851,7 @@ export function ProjectGridPanel({
                     doorTag={doorTag}
                     groupLines={groupLines}
                     markupFactor={markupFactor}
-                    manufacturerOf={manufacturerOf}
+                    supplierOf={supplierOf}
                     editable={editable}
                     commentCount={commentCounts?.get(group.id) ?? 0}
                     onOpenComments={onOpenComments ? () => onOpenComments(group.id) : undefined}

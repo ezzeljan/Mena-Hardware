@@ -18,7 +18,7 @@ export function Sidebar({ isAdmin }: SidebarProps) {
     { to: '/projects', label: 'Projects', icon: FolderKanban },
     { to: '/parts', label: 'Parts Library', icon: Boxes },
     { to: '/standard-sets', label: 'Standard Sets', icon: Layers },
-    { to: '/manufacturers', label: 'Manufacturers', icon: Building2 },
+    { to: '/suppliers', label: 'Suppliers', icon: Building2 },
     ...(isAdmin ? [{ to: '/users', label: 'Users & Roles', icon: Users }] : []),
   ]
 

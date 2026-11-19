@@ -12,7 +12,7 @@ export interface Profile {
   created_at: string
 }
 
-export interface Manufacturer {
+export interface Supplier {
   id: string
   name: string
   is_owner_supplied: boolean
@@ -23,13 +23,13 @@ export interface Manufacturer {
 export interface Part {
   id: string
   sku: string
-  manufacturer_id: string
+  supplier_id: string
   description: string
   unit_cost: number | null
   active: boolean
   created_at: string
   updated_at: string
-  manufacturers?: Pick<Manufacturer, 'id' | 'name' | 'is_owner_supplied'> | null
+  suppliers?: Pick<Supplier, 'id' | 'name' | 'is_owner_supplied'> | null
 }
 
 export interface PartPriceHistory {

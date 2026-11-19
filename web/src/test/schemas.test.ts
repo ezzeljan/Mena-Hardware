@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  manufacturerSchema,
+  supplierSchema,
   nullablePriceSchema,
   parseNullablePriceInput,
   partFormSchema,
@@ -29,8 +29,8 @@ describe('Shared Zod Schemas & Price Parsing', () => {
     expect(() => parseNullablePriceInput('abc')).toThrow()
   })
 
-  it('uppercases manufacturer names and validates owner-supplied flag', () => {
-    const parsed = manufacturerSchema.parse({
+  it('uppercases supplier names and validates owner-supplied flag', () => {
+    const parsed = supplierSchema.parse({
       name: '  novas ',
       is_owner_supplied: false,
     })
@@ -41,7 +41,7 @@ describe('Shared Zod Schemas & Price Parsing', () => {
   it('validates part form with blank unit_cost', () => {
     const valid = partFormSchema.safeParse({
       sku: '505BC+SLC',
-      manufacturer_id: '00000000-0000-0000-0000-000000000001',
+      supplier_id: '00000000-0000-0000-0000-000000000001',
       description: 'SLIDING ARM DOOR CLOSER',
       unit_cost: '',
       active: true,

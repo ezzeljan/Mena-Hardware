@@ -18,7 +18,7 @@ export const GRID_COLUMNS: { label: string; align?: 'right' | 'center' }[] = [
   { label: 'DOOR CLASSIFICATION' },
   { label: 'LEAFS' },
   { label: 'LEGEND' },
-  { label: 'MANUFACTURER' },
+  { label: 'SUPPLIER' },
   { label: 'PART NUMBER (SKU)' },
   { label: 'DESCRIPTION' },
   { label: 'QTY', align: 'right' },
@@ -32,8 +32,8 @@ export const GRID_COLUMNS: { label: string; align?: 'right' | 'center' }[] = [
   { label: 'MHQT REMARKS' },
 ]
 
-/** Manufacturer of a line, from its Parts Library part. */
-export interface LineManufacturer {
+/** Supplier of a line, from its Parts Library part. */
+export interface LineSupplier {
   name: string
   ownerSupplied: boolean
 }
@@ -45,7 +45,7 @@ interface GroupRowsFragmentProps {
   groupLines: ProjectLine[]
   markupFactor: number
   editable: boolean
-  manufacturerOf: (line: ProjectLine) => LineManufacturer | null
+  supplierOf: (line: ProjectLine) => LineSupplier | null
   /** PM comments on this door group. */
   commentCount: number
   onOpenComments?: () => void
@@ -72,7 +72,7 @@ export function GroupRowsFragment({
   groupLines,
   markupFactor,
   editable,
-  manufacturerOf,
+  supplierOf,
   commentCount,
   onOpenComments,
   highlighted = false,
@@ -179,7 +179,7 @@ export function GroupRowsFragment({
         const qty = Number(line.qty_per_door)
         const cost = line.unit_price === null ? null : Number(line.unit_price)
         const price = cost === null ? null : cost * markupFactor
-        const maker = manufacturerOf(line)
+        const maker = supplierOf(line)
 
         const isAdded = line.origin === 'added'
         const addedBg = isAdded ? 'bg-green-100/80' : ''

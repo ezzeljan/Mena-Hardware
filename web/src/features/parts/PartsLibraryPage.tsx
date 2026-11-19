@@ -32,7 +32,7 @@ import {
   type PartFormValues,
 } from '@/lib/schemas'
 import { formatCurrency } from '@/lib/utils'
-import type { Manufacturer, Part, PartPriceHistory } from '@/types/database'
+import type { Supplier, Part, PartPriceHistory } from '@/types/database'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -59,7 +59,7 @@ export function PartsLibraryPage() {
   const queryClient = useQueryClient()
 
   const [searchQuery, setSearchQuery] = useState('')
-  const [manufacturerFilter, setManufacturerFilter] = useState<string>('ALL')
+  const [supplierFilter, setSupplierFilter] = useState<string>('ALL')
   const [showInactive, setShowInactive] = useState<boolean>(false)
   const [sorting, setSorting] = useState<SortingState>([
     { id: 'sku', desc: false },
@@ -75,22 +75,22 @@ export function PartsLibraryPage() {
     resolver: zodResolver(partFormSchema),
     defaultValues: {
       sku: '',
-      manufacturer_id: '',
+      supplier_id: '',
       description: '',
       unit_cost: '',
       active: true,
     },
   })
 
-  const manufacturersQuery = useQuery({
-    queryKey: ['manufacturers'],
-    queryFn: async (): Promise<Manufacturer[]> => {
+  const suppliersQuery = useQuery({
+    queryKey: ['suppliers'],
+    queryFn: async (): Promise<Supplier[]> => {
       const { data, error } = await supabase
-        .from('manufacturers')
+        .from('suppliers')
         .select('id, name, is_owner_supplied, created_at, updated_at')
         .order('name', { ascending: true })
       if (error) throw error
-      return (data ?? []) as Manufacturer[]
+      return (data ?? []) as Supplier[]
     },
   })
 
@@ -101,7 +101,7 @@ export function PartsLibraryPage() {
         supabase
           .from('parts')
           .select(
-            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at, manufacturers(id, name, is_owner_supplied)',
+            'id, sku, supplier_id, description, unit_cost, active, created_at, updated_at, suppliers(id, name, is_owner_supplied)',
           )
           .order('sku', { ascending: true })
           .order('id', { ascending: true })
@@ -134,7 +134,7 @@ export function PartsLibraryPage() {
           .from('parts')
           .update({
             sku: parsed.sku.trim(),
-            manufacturer_id: parsed.manufacturer_id,
+            supplier_id: parsed.supplier_id,
             description: parsed.description.trim(),
             unit_cost: nullableCost,
             active: parsed.active,
@@ -144,7 +144,7 @@ export function PartsLibraryPage() {
       } else {
         const { error } = await supabase.from('parts').insert({
           sku: parsed.sku.trim(),
-          manufacturer_id: parsed.manufacturer_id,
+          supplier_id: parsed.supplier_id,
           description: parsed.description.trim(),
           unit_cost: nullableCost,
           active: parsed.active,
@@ -187,20 +187,20 @@ export function PartsLibraryPage() {
     return all.filter((part) => {
       if (!showInactive && !part.active) return false
       if (
-        manufacturerFilter !== 'ALL' &&
-        part.manufacturer_id !== manufacturerFilter
+        supplierFilter !== 'ALL' &&
+        part.supplier_id !== supplierFilter
       ) {
         return false
       }
       if (!q) return true
-      const mfgName = part.manufacturers?.name?.toLowerCase() ?? ''
+      const mfgName = part.suppliers?.name?.toLowerCase() ?? ''
       return (
         part.sku.toLowerCase().includes(q) ||
         part.description.toLowerCase().includes(q) ||
         mfgName.includes(q)
       )
     })
-  }, [partsQuery.data, searchQuery, manufacturerFilter, showInactive])
+  }, [partsQuery.data, searchQuery, supplierFilter, showInactive])
 
   const columns = useMemo<ColumnDef<Part>[]>(
     () => [
@@ -223,20 +223,20 @@ export function PartsLibraryPage() {
         ),
       },
       {
-        id: 'manufacturer',
-        accessorFn: (row) => row.manufacturers?.name ?? '',
+        id: 'supplier',
+        accessorFn: (row) => row.suppliers?.name ?? '',
         header: ({ column }) => (
           <button
             type="button"
             className="inline-flex items-center gap-1 font-semibold uppercase tracking-wider hover:text-neutral-950 cursor-pointer"
             onClick={() => column.toggleSorting(column.getIsSorted() === 'asc')}
           >
-            <span>Manufacturer</span>
+            <span>Supplier</span>
             <ArrowUpDown className="h-3 w-3" />
           </button>
         ),
         cell: ({ row }) => {
-          const mfg = row.original.manufacturers
+          const mfg = row.original.suppliers
           return (
             <div className="flex items-center gap-1.5">
               <Badge variant={mfg?.is_owner_supplied ? 'default' : 'outline'}>
@@ -339,7 +339,7 @@ export function PartsLibraryPage() {
                       setFormError(null)
                       form.reset({
                         sku: part.sku,
-                        manufacturer_id: part.manufacturer_id,
+                        supplier_id: part.supplier_id,
                         description: part.description,
                         unit_cost:
                           part.unit_cost === null || part.unit_cost === undefined
@@ -409,10 +409,10 @@ export function PartsLibraryPage() {
   function openAddPartDialog() {
     setEditingPart(null)
     setFormError(null)
-    const defaultMfgId = manufacturersQuery.data?.[0]?.id ?? ''
+    const defaultMfgId = suppliersQuery.data?.[0]?.id ?? ''
     form.reset({
       sku: '',
-      manufacturer_id: defaultMfgId,
+      supplier_id: defaultMfgId,
       description: '',
       unit_cost: '',
       active: true,
@@ -456,13 +456,13 @@ export function PartsLibraryPage() {
           </div>
 
           <select
-            aria-label="Filter by manufacturer"
-            value={manufacturerFilter}
-            onChange={(e) => setManufacturerFilter(e.target.value)}
+            aria-label="Filter by supplier"
+            value={supplierFilter}
+            onChange={(e) => setSupplierFilter(e.target.value)}
             className="h-9 rounded-md border border-neutral-300 bg-white px-3 text-sm text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950"
           >
-            <option value="ALL">All Manufacturers</option>
-            {manufacturersQuery.data?.map((mfg) => (
+            <option value="ALL">All Suppliers</option>
+            {suppliersQuery.data?.map((mfg) => (
               <option key={mfg.id} value={mfg.id}>
                 {mfg.name} {mfg.is_owner_supplied ? '(OSM)' : ''}
               </option>
@@ -618,22 +618,22 @@ export function PartsLibraryPage() {
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="part-manufacturer">Manufacturer</Label>
+                <Label htmlFor="part-supplier">Supplier</Label>
                 <select
-                  id="part-manufacturer"
-                  {...form.register('manufacturer_id')}
+                  id="part-supplier"
+                  {...form.register('supplier_id')}
                   className="flex h-9 w-full rounded-md border border-neutral-300 bg-white px-3 py-1 text-sm text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950"
                 >
-                  <option value="">Select manufacturer...</option>
-                  {manufacturersQuery.data?.map((mfg) => (
+                  <option value="">Select supplier...</option>
+                  {suppliersQuery.data?.map((mfg) => (
                     <option key={mfg.id} value={mfg.id}>
                       {mfg.name} {mfg.is_owner_supplied ? '(OSM)' : ''}
                     </option>
                   ))}
                 </select>
-                {form.formState.errors.manufacturer_id && (
+                {form.formState.errors.supplier_id && (
                   <p className="text-xs font-medium text-neutral-900">
-                    {form.formState.errors.manufacturer_id.message}
+                    {form.formState.errors.supplier_id.message}
                   </p>
                 )}
               </div>

@@ -13,9 +13,9 @@ const DashboardPage = lazy(() =>
 const PartsLibraryPage = lazy(() =>
   import('@/features/parts/PartsLibraryPage').then((m) => ({ default: m.PartsLibraryPage })),
 )
-const ManufacturersPage = lazy(() =>
-  import('@/features/manufacturers/ManufacturersPage').then((m) => ({
-    default: m.ManufacturersPage,
+const SuppliersPage = lazy(() =>
+  import('@/features/suppliers/SuppliersPage').then((m) => ({
+    default: m.SuppliersPage,
   })),
 )
 const StandardSetsPage = lazy(() =>
@@ -72,7 +72,8 @@ export default function App() {
               <Route path="/projects/:id" element={<ProjectDetailPage />} />
               <Route path="/projects/:id/hardware" element={<ProjectHardwarePage />} />
               <Route path="/parts" element={<PartsLibraryPage />} />
-              <Route path="/manufacturers" element={<ManufacturersPage />} />
+              <Route path="/suppliers" element={<SuppliersPage />} />
+              <Route path="/manufacturers" element={<Navigate to="/suppliers" replace />} />
               <Route path="/standard-sets" element={<StandardSetsPage />} />
               <Route
                 path="/standard-sets/:id"

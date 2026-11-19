@@ -7,7 +7,7 @@ import { DELIVERY_PER_DOOR } from '@/features/projects/pricing'
  * Excel export in the layout of Mena's final "NOVAS Template":
  *   rows 1-4  title, Project, Client, Schedule # (date), markup (F3),
  *             overall door qty (E4), deliveries (K4), total ex. GST (K3)
- *   row 5     LEGEND | MANUFACTURER | PART NUMBER | DESCRIPTION | QTY | Cost |
+ *   row 5     LEGEND | SUPPLIER | PART NUMBER | DESCRIPTION | QTY | Cost |
  *             Cost Door | Price | Price Door | HW Price per Door Type |
  *             Overall HW Price per Typical Door | Total Items per Typical Door |
  *             MHQT REMARKS (from each line's remarks in the grid)
@@ -30,8 +30,8 @@ export interface ProjectExportInput {
   version: ProjectVersion
   groups: DoorGroup[]
   lines: ProjectLine[]
-  /** Library parts, for each line's manufacturer (matched by part id, else SKU). */
-  parts?: Pick<Part, 'id' | 'sku' | 'manufacturers'>[]
+  /** Library parts, for each line's supplier (matched by part id, else SKU). */
+  parts?: Pick<Part, 'id' | 'sku' | 'suppliers'>[]
 }
 
 // Number formats and colours copied from the Mena "NOVAS Template" workbook.
@@ -67,7 +67,7 @@ const COLUMN_WIDTHS = [22.71, 18.86, 20.29, 96, 9.57, 12.71, 15.71, 12.71, 15.71
 const TABLE_HEADER_ROW = 5
 const TABLE_HEADERS = [
   'LEGEND',
-  'MANUFACTURER',
+  'SUPPLIER',
   'PART NUMBER',
   'DESCRIPTION',
   'QTY',
@@ -126,7 +126,7 @@ export async function buildProjectExportWorkbook({
   const markupRate = Number(version.markup_pct ?? 15) / 100
   const markupFactor = 1 + markupRate
 
-  // Manufacturer per line: from its library part (by id, else by SKU).
+  // Supplier per line: from its library part (by id, else by SKU).
   const partById = new Map(parts.map((p) => [p.id, p]))
   const partBySku = new Map(parts.map((p) => [p.sku.trim().toUpperCase(), p]))
   const partOf = (line: ProjectLine) =>
@@ -241,15 +241,15 @@ export async function buildProjectExportWorkbook({
       const r = currentRow++
       const row = ws.getRow(r)
       const part = partOf(line)
-      const manufacturer = part?.manufacturers?.name ?? ''
-      const ownerSupplied = part?.manufacturers?.is_owner_supplied ?? false
+      const supplier = part?.suppliers?.name ?? ''
+      const ownerSupplied = part?.suppliers?.is_owner_supplied ?? false
       const qty = Number(line.qty_per_door)
       const hasPrice = line.unit_price !== null
       const cost = hasPrice ? Number(line.unit_price) : null
 
       // LEGEND: "MM" for owner-supplied (Mena) items, as in the template.
       if (ownerSupplied) row.getCell(1).value = 'MM'
-      if (manufacturer) row.getCell(2).value = manufacturer
+      if (supplier) row.getCell(2).value = supplier
       row.getCell(3).value = line.sku
       row.getCell(4).value = line.description
       row.getCell(5).value = qty

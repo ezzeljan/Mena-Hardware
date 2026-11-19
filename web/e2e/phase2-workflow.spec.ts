@@ -23,7 +23,7 @@ const VERSION2_ID = 'bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb'
 const UPLOAD_ID = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 const SET_FIRE_ID = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
 const SET_BATH_ID = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
-const MFR_ID = '44444444-cccc-cccc-cccc-444444444444'
+const SUPPLIER_ID = '44444444-cccc-cccc-cccc-444444444444'
 const TS = '2026-11-18T00:00:00Z'
 const PROJECT_NAME = 'SV999 — E2E Test Tower'
 
@@ -131,17 +131,17 @@ const standardSets = [
   },
 ]
 
-const manufacturer = { id: MFR_ID, name: 'MM', is_owner_supplied: true }
+const supplier = { id: SUPPLIER_ID, name: 'MM', is_owner_supplied: true }
 const partsList = [
   {
-    id: '55555555-5555-5555-5555-555555555551', sku: 'MMHINGE', manufacturer_id: MFR_ID,
+    id: '55555555-5555-5555-5555-555555555551', sku: 'MMHINGE', supplier_id: SUPPLIER_ID,
     description: 'HINGES 100X100 4BB BLACK', unit_cost: 4, active: true,
-    created_at: TS, updated_at: TS, manufacturers: manufacturer,
+    created_at: TS, updated_at: TS, suppliers: supplier,
   },
   {
-    id: '55555555-5555-5555-5555-555555555552', sku: '505BC+SLC', manufacturer_id: MFR_ID,
+    id: '55555555-5555-5555-5555-555555555552', sku: '505BC+SLC', supplier_id: SUPPLIER_ID,
     description: 'SLIDING ARM DOOR CLOSER', unit_cost: null, active: true,
-    created_at: TS, updated_at: TS, manufacturers: manufacturer,
+    created_at: TS, updated_at: TS, suppliers: supplier,
   },
 ]
 
@@ -239,8 +239,8 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
     }
     return json(route, state.comments)
   })
-  await page.route('**/rest/v1/manufacturers**', (route) =>
-    json(route, [{ ...manufacturer, created_at: TS, updated_at: TS }]),
+  await page.route('**/rest/v1/suppliers**', (route) =>
+    json(route, [{ ...supplier, created_at: TS, updated_at: TS }]),
   )
   await page.route('**/rest/v1/parts**', (route) => json(route, partsList))
   await page.route('**/rest/v1/standard_sets**', (route) => json(route, standardSets))
@@ -1078,7 +1078,7 @@ test('Hardware grid: NOVAS Template columns and editable MHQT remarks', async ({
   await page.goto(`/projects/${PROJECT_ID}/hardware`)
 
   for (const header of [
-    'LEGEND', 'MANUFACTURER', 'COST DOOR', 'PRICE DOOR', 'HW PRICE PER DOOR TYPE',
+    'LEGEND', 'SUPPLIER', 'COST DOOR', 'PRICE DOOR', 'HW PRICE PER DOOR TYPE',
     'OVERALL HW PRICE PER TYPICAL DOOR', 'TOTAL ITEMS PER TYPICAL DOOR', 'MHQT REMARKS',
   ]) {
     await expect(page.getByRole('columnheader', { name: header, exact: true })).toBeVisible()

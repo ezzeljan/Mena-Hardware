@@ -71,8 +71,8 @@ describe('buildProjectExportWorkbook', () => {
     ]
 
     const parts = [
-      { id: 'p-hinge', sku: 'MMHINGE', manufacturers: { id: 'm1', name: 'MM', is_owner_supplied: true } },
-      { id: 'p-seal', sku: 'CUSTOMSEAL', manufacturers: { id: 'm2', name: 'NOVAS', is_owner_supplied: false } },
+      { id: 'p-hinge', sku: 'MMHINGE', suppliers: { id: 'm1', name: 'MM', is_owner_supplied: true } },
+      { id: 'p-seal', sku: 'CUSTOMSEAL', suppliers: { id: 'm2', name: 'NOVAS', is_owner_supplied: false } },
     ]
 
     const buf = await buildProjectExportWorkbook({
@@ -120,7 +120,7 @@ describe('buildProjectExportWorkbook', () => {
     // Table header row 5
     expect(ws!.getRow(5).values).toEqual([
       undefined,
-      'LEGEND', 'MANUFACTURER', 'PART NUMBER', 'DESCRIPTION', 'QTY', 'Cost', 'Cost Door', 'Price',
+      'LEGEND', 'SUPPLIER', 'PART NUMBER', 'DESCRIPTION', 'QTY', 'Cost', 'Cost Door', 'Price',
       'Price Door', 'Hardware Price \nper Door Type', 'Overall HW Price \nper Typical Door',
       'Total Items \nper Typical Door', 'MHQT  REMARKS',
     ])
