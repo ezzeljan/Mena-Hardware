@@ -81,9 +81,21 @@ describe('Shared Zod Schemas & Price Parsing', () => {
       client: 'Mena Contractors',
       site: 'Sydney CBD',
       status: 'active',
+      stage: 'tender',
       assigned_pm: '',
     })
     expect(valid.success).toBe(true)
+
+    const badStage = projectFormSchema.safeParse({
+      reference_no: '',
+      name: 'Harborview Apartments',
+      client: '',
+      site: '',
+      status: 'active',
+      stage: 'lost',
+      assigned_pm: '',
+    })
+    expect(badStage.success).toBe(false)
 
     const missingName = projectFormSchema.safeParse({
       reference_no: '',
@@ -91,6 +103,7 @@ describe('Shared Zod Schemas & Price Parsing', () => {
       client: '',
       site: '',
       status: 'active',
+      stage: 'tender',
       assigned_pm: '',
     })
     expect(missingName.success).toBe(false)

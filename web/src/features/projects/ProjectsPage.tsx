@@ -4,7 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, FolderKanban, Plus, Search, Trash2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/features/auth/AuthContext'
-import type { Profile, Project, ProjectVersion } from '@/types/database'
+import type { Profile, Project, ProjectStage, ProjectVersion } from '@/types/database'
+import { StageBadge, StageSelect } from '@/features/projects/ProjectStage'
 import { CreateProjectForm } from '@/features/projects/CreateProjectWizard'
 import { deleteProjectWithStorage } from '@/features/projects/deleteProject'
 import { Badge } from '@/components/ui/badge'
@@ -19,6 +20,8 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { projectDisplayName } from '@/lib/projectName'
+import { useProfileDirectory } from '@/features/account/useProfileDirectory'
+import { AvatarStack } from '@/components/avatar/UserAvatar'
 import {
   Table,
   TableBody,
@@ -30,14 +33,17 @@ import {
 
 interface ProjectRow extends Project {
   project_versions?: Pick<ProjectVersion, 'id' | 'version_no' | 'status'>[]
+  project_estimators?: { estimator_id: string }[]
 }
 
 export function ProjectsPage() {
-  const { isAdmin, isPmOrAdmin, role } = useAuth()
+  const { isAdmin, isPmOrAdmin, role, user } = useAuth()
+  const directory = useProfileDirectory()
   const queryClient = useQueryClient()
 
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'active' | 'archived'>('active')
+  const [stageFilter, setStageFilter] = useState<'ALL' | ProjectStage>('ALL')
   const [wizardOpen, setWizardOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<ProjectRow | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -48,7 +54,7 @@ export function ProjectsPage() {
       const { data, error } = await supabase
         .from('projects')
         .select(
-          'id, reference_no, name, client, site, status, created_by, assigned_pm, created_at, updated_at, project_versions(id, version_no, status)',
+          'id, reference_no, name, client, site, status, stage, created_by, assigned_pm, created_at, updated_at, project_versions(id, version_no, status), project_estimators(estimator_id)',
         )
         .order('updated_at', { ascending: false })
       if (error) throw error
@@ -91,6 +97,7 @@ export function ProjectsPage() {
 
     return all.filter((p) => {
       if (statusFilter !== 'ALL' && p.status !== statusFilter) return false
+      if (stageFilter !== 'ALL' && p.stage !== stageFilter) return false
       if (!q) return true
       return (
         p.reference_no.toLowerCase().includes(q) ||
@@ -99,7 +106,23 @@ export function ProjectsPage() {
         p.site.toLowerCase().includes(q)
       )
     })
-  }, [projectsQuery.data, searchQuery, statusFilter])
+  }, [projectsQuery.data, searchQuery, statusFilter, stageFilter])
+
+  /** The project's assigned PM and admins can change the stage. */
+  function canChangeStage(project: ProjectRow) {
+    return isAdmin || (role === 'pm' && !!user && project.assigned_pm === user.id)
+  }
+
+  function teamOf(project: ProjectRow) {
+    const ids = [
+      ...(project.assigned_pm ? [project.assigned_pm] : []),
+      ...(project.project_estimators ?? []).map((e) => e.estimator_id),
+    ]
+    return ids.map((id) => {
+      const p = directory.byId.get(id)
+      return { id, full_name: p?.full_name ?? null, avatar_url: p?.avatar_url ?? null }
+    })
+  }
 
   function getLatestVersion(project: ProjectRow) {
     const versions = project.project_versions ?? []
@@ -142,7 +165,7 @@ export function ProjectsPage() {
             <Search className="h-4 w-4 absolute left-3 top-2.5 text-neutral-400" />
             <Input
               aria-label="Search projects"
-              placeholder="Search Ref No., project name, builder, or site..."
+              placeholder="Search Ref No., project name, client, or site..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9 bg-white"
@@ -160,6 +183,17 @@ export function ProjectsPage() {
             <option value="active">Active Projects</option>
             <option value="archived">Archived Projects</option>
             <option value="ALL">All Statuses</option>
+          </select>
+
+          <select
+            aria-label="Filter by project stage"
+            value={stageFilter}
+            onChange={(e) => setStageFilter(e.target.value as 'ALL' | ProjectStage)}
+            className="h-9 rounded-md border border-neutral-300 bg-white px-3 text-sm text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950"
+          >
+            <option value="ALL">All Stages</option>
+            <option value="tender">Tender</option>
+            <option value="awarded">Awarded</option>
           </select>
         </div>
 
@@ -195,8 +229,10 @@ export function ProjectsPage() {
             <TableRow>
               <TableHead>Ref No.</TableHead>
               <TableHead>Project Name</TableHead>
-              <TableHead>Builder</TableHead>
+              <TableHead>Client</TableHead>
               <TableHead>Site</TableHead>
+              <TableHead>Stage</TableHead>
+              <TableHead>Team</TableHead>
               <TableHead>Latest Version</TableHead>
               <TableHead>Project Status</TableHead>
               <TableHead>Updated</TableHead>
@@ -224,6 +260,21 @@ export function ProjectsPage() {
                   </TableCell>
                   <TableCell className="text-sm text-neutral-700">
                     {project.site || '—'}
+                  </TableCell>
+                  <TableCell>
+                    {canChangeStage(project) ? (
+                      <StageSelect
+                        projectId={project.id}
+                        stage={project.stage}
+                        label={`Stage of ${projectDisplayName(project)}`}
+                      />
+                    ) : (
+                      <StageBadge stage={project.stage} />
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {/* PM first, then estimators */}
+                    <AvatarStack people={teamOf(project)} />
                   </TableCell>
                   <TableCell>
                     {latest ? (

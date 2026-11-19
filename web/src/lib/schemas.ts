@@ -127,12 +127,15 @@ export const updateUserRoleSchema = z.object({
 
 export const projectStatusSchema = z.enum(['active', 'archived'])
 
+export const projectStageSchema = z.enum(['tender', 'awarded'])
+
 export const projectFormSchema = z.object({
   reference_no: z.string().trim().max(40, 'Reference No. is too long'),
   name: z.string().trim().min(1, 'Project name is required').max(160, 'Project name is too long'),
   client: z.string().trim().max(160, 'Client name is too long'),
   site: z.string().trim().max(200, 'Site address is too long'),
   status: projectStatusSchema,
+  stage: projectStageSchema,
   assigned_pm: z.string().refine(
     (val) => val === '' || z.string().uuid().safeParse(val).success,
     { message: 'Invalid PM selection' },

@@ -3,12 +3,27 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, FileSpreadsheet, Pencil, Trash2, Upload } from 'lucide-react'
+import {
+  ArrowLeft,
+  ArrowRight,
+  Building2,
+  CalendarDays,
+  CircleDot,
+  FileSpreadsheet,
+  Flag,
+  MapPin,
+  Pencil,
+  Trash2,
+  Upload,
+  type LucideIcon,
+} from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { fetchAllRows } from '@/lib/fetchAll'
 import { projectDisplayName } from '@/lib/projectName'
 import { projectFormSchema, type ProjectFormValues } from '@/lib/schemas'
 import type { Profile, VersionStatus } from '@/types/database'
+import { ProjectActivityPanel } from '@/features/projects/ProjectActivityPanel'
+import { PROJECT_STAGES, StageBadge } from '@/features/projects/ProjectStage'
 import { ProjectTeamPanel } from '@/features/projects/ProjectTeamPanel'
 import { QuotationImportWizard } from '@/features/projects/QuotationImportWizard'
 import { deleteProjectWithStorage } from '@/features/projects/deleteProject'
@@ -34,13 +49,26 @@ const VERSION_STATUS_TEXT: Record<VersionStatus, string> = {
   superseded: 'Superseded',
 }
 
-function DetailField({ label, children }: { label: string; children: ReactNode }) {
+function DetailField({
+  label,
+  icon: Icon,
+  children,
+}: {
+  label: string
+  icon: LucideIcon
+  children: ReactNode
+}) {
   return (
-    <div className="space-y-0.5">
-      <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
-        {label}
+    <div className="flex min-w-0 items-center gap-2.5">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-neutral-200 bg-white text-neutral-500">
+        <Icon className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 space-y-0.5">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-neutral-500">
+          {label}
+        </div>
+        <div className="truncate text-sm text-neutral-950">{children}</div>
       </div>
-      <div className="text-sm text-neutral-950">{children}</div>
     </div>
   )
 }
@@ -80,6 +108,7 @@ export function ProjectDetailPage() {
       client: '',
       site: '',
       status: 'active',
+      stage: 'tender',
       assigned_pm: '',
     },
   })
@@ -142,6 +171,7 @@ export function ProjectDetailPage() {
           client: parsed.client,
           site: parsed.site,
           status: parsed.status,
+          stage: parsed.stage,
           assigned_pm: parsed.assigned_pm === '' ? null : parsed.assigned_pm,
         })
         .eq('id', id)
@@ -226,6 +256,7 @@ export function ProjectDetailPage() {
                   client: project.client,
                   site: project.site,
                   status: project.status,
+                  stage: project.stage ?? 'tender',
                   assigned_pm: project.assigned_pm ?? '',
                 })
                 setEditOpen(true)
@@ -259,15 +290,18 @@ export function ProjectDetailPage() {
             {project.status.toUpperCase()}
           </Badge>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-3">
-          <DetailField label="Reference No.">
-            <span className="font-mono font-semibold">{project.reference_no || '—'}</span>
+        {/* One row on wide screens; wraps into 3 or 2 columns on smaller ones */}
+        <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 xl:grid-cols-5">
+          <DetailField label="Client" icon={Building2}>{project.client || '—'}</DetailField>
+          <DetailField label="Site" icon={MapPin}>{project.site || '—'}</DetailField>
+          {/* Read-only here; changed from the Projects list or Edit Project Info. */}
+          <DetailField label="Stage" icon={Flag}>
+            <StageBadge stage={project.stage ?? 'tender'} />
           </DetailField>
-          <DetailField label="Project Name">{project.name}</DetailField>
-          <DetailField label="Builder">{project.client || '—'}</DetailField>
-          <DetailField label="Site">{project.site || '—'}</DetailField>
-          <DetailField label="Status">{project.status === 'active' ? 'Active' : 'Archived'}</DetailField>
-          <DetailField label="Created">
+          <DetailField label="Status" icon={CircleDot}>
+            {project.status === 'active' ? 'Active' : 'Archived'}
+          </DetailField>
+          <DetailField label="Created" icon={CalendarDays}>
             {new Date(project.created_at).toLocaleDateString(undefined, {
               day: 'numeric',
               month: 'short',
@@ -277,91 +311,106 @@ export function ProjectDetailPage() {
         </div>
       </div>
 
-      <ProjectTeamPanel
-        projectId={project.id}
-        assignedPmId={project.assigned_pm}
-        estimators={estimators}
-        canManage={canReview}
-      />
-
-      {/* Hardware schedule */}
-      {needsQuotation ? (
-        importOpen && canEditContent ? (
-          <QuotationImportWizard
+      {/*
+        Project Team (left) | Hardware Schedule (centre) | Activities (right).
+        On medium screens Activities drops below the other two.
+      */}
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[max-content_minmax(0,1fr)] xl:grid-cols-[max-content_minmax(0,1fr)_20rem]">
+        {/* Sized to its content (longest name), capped so many estimators wrap */}
+        <div className="lg:max-w-xs">
+          <ProjectTeamPanel
             projectId={project.id}
-            projectName={displayName}
-            onCancel={() => setImportOpen(false)}
-            onDone={() => {
-              setImportOpen(false)
-              navigate(`/projects/${project.id}/hardware`)
-            }}
+            assignedPmId={project.assigned_pm}
+            estimators={estimators}
+            canManage={canReview}
           />
-        ) : (
-          <div className="border border-dashed border-neutral-300 bg-neutral-50 p-8 text-center space-y-3">
-            <div className="text-sm font-medium text-neutral-950">
-              No quotation imported yet
-            </div>
-            <p className="text-xs text-neutral-600">
-              {canEditContent
-                ? 'Upload the quotation .xlsx and match each door group to a standard hardware set to create version 1.'
-                : estimators.length === 0
-                  ? 'Waiting for the PM to assign an estimator.'
-                  : 'Waiting for the assigned estimator to upload the quotation and do the matching.'}
-            </p>
-            {canEditContent && (
-              <Button size="sm" onClick={() => setImportOpen(true)}>
-                <Upload className="h-3.5 w-3.5" />
-                <span>Upload Quotation</span>
-              </Button>
-            )}
-          </div>
-        )
-      ) : (
-        latestVersion && (
-          <div className="border border-neutral-300 bg-white p-5 rounded-md flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1.5">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                <FileSpreadsheet className="h-3.5 w-3.5" />
-                <span>Hardware Schedule</span>
+        </div>
+
+        <div className="min-w-0">
+          {needsQuotation ? (
+            <div className="border border-dashed border-neutral-300 bg-neutral-50 p-8 text-center space-y-3 flex flex-col items-center justify-center">
+              <div className="text-sm font-medium text-neutral-950">
+                No quotation imported yet
               </div>
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-mono font-semibold text-neutral-950">
-                  v{latestVersion.version_no}
-                </span>
-                <Badge
-                  variant={latestVersion.status === 'approved' ? 'default' : 'outline'}
-                  className="uppercase tracking-wider text-[10px]"
-                >
-                  {latestVersion.status.replace('_', ' ')}
-                </Badge>
-                <span className="text-neutral-700">{VERSION_STATUS_TEXT[latestVersion.status]}</span>
-              </div>
-              <div className="text-xs text-neutral-600">
-                {summary
-                  ? `${summary.groupCount} door group${summary.groupCount === 1 ? '' : 's'} · ${summary.doorCount} door${summary.doorCount === 1 ? '' : 's'}`
-                  : 'Loading summary...'}
-                {' · '}
-                Updated{' '}
-                {new Date(latestVersion.updated_at).toLocaleDateString(undefined, {
-                  day: 'numeric',
-                  month: 'short',
-                  year: 'numeric',
-                })}
-              </div>
-              {summary?.fileName && (
-                <div className="text-xs text-neutral-600">
-                  Quotation file: <span className="font-medium text-neutral-900">{summary.fileName}</span>
-                </div>
+              <p className="text-xs text-neutral-600">
+                {importOpen && canEditContent
+                  ? 'Importing the quotation below.'
+                  : canEditContent
+                    ? 'Upload the quotation .xlsx and match each door group to a standard hardware set to create version 1.'
+                    : estimators.length === 0
+                      ? 'Waiting for the PM to assign an estimator.'
+                      : 'Waiting for the assigned estimator to upload the quotation and do the matching.'}
+              </p>
+              {canEditContent && !importOpen && (
+                <Button size="sm" onClick={() => setImportOpen(true)}>
+                  <Upload className="h-3.5 w-3.5" />
+                  <span>Upload Quotation</span>
+                </Button>
               )}
             </div>
-            <Button asChild>
-              <Link to={`/projects/${project.id}/hardware`}>
-                <span>Open Hardware Schedule</span>
-                <ArrowRight className="h-3.5 w-3.5" />
-              </Link>
-            </Button>
-          </div>
-        )
+          ) : (
+            latestVersion && (
+              <div className="border border-neutral-300 bg-white p-4 rounded-md flex flex-col gap-4 2xl:flex-row 2xl:items-start 2xl:justify-between">
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    <FileSpreadsheet className="h-3.5 w-3.5" />
+                    <span>Hardware Schedule</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-mono font-semibold text-neutral-950">
+                      v{latestVersion.version_no}
+                    </span>
+                    <Badge
+                      variant={latestVersion.status === 'approved' ? 'default' : 'outline'}
+                      className="uppercase tracking-wider text-[10px]"
+                    >
+                      {latestVersion.status.replace('_', ' ')}
+                    </Badge>
+                    <span className="text-neutral-700">{VERSION_STATUS_TEXT[latestVersion.status]}</span>
+                  </div>
+                  <div className="text-xs text-neutral-600">
+                    {summary
+                      ? `${summary.groupCount} door group${summary.groupCount === 1 ? '' : 's'} · ${summary.doorCount} door${summary.doorCount === 1 ? '' : 's'}`
+                      : 'Loading summary...'}
+                    {' · '}
+                    Updated{' '}
+                    {new Date(latestVersion.updated_at).toLocaleDateString(undefined, {
+                      day: 'numeric',
+                      month: 'short',
+                      year: 'numeric',
+                    })}
+                  </div>
+                  {summary?.fileName && (
+                    <div className="text-xs text-neutral-600">
+                      Quotation file: <span className="font-medium text-neutral-900">{summary.fileName}</span>
+                    </div>
+                  )}
+                </div>
+                <Button asChild className="self-start">
+                  <Link to={`/projects/${project.id}/hardware`}>
+                    <span>Open Hardware Schedule</span>
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </Link>
+                </Button>
+              </div>
+            )
+          )}
+        </div>
+
+        <ProjectActivityPanel projectId={project.id} className="lg:col-span-2 xl:col-span-1" />
+      </div>
+
+      {/* The import wizard needs the full page width */}
+      {needsQuotation && importOpen && canEditContent && (
+        <QuotationImportWizard
+          projectId={project.id}
+          projectName={displayName}
+          onCancel={() => setImportOpen(false)}
+          onDone={() => {
+            setImportOpen(false)
+            navigate(`/projects/${project.id}/hardware`)
+          }}
+        />
       )}
 
       {/* Edit Project Modal */}
@@ -371,8 +420,8 @@ export function ProjectDetailPage() {
             <DialogTitle>Edit Project Info</DialogTitle>
             <DialogDescription>
               {isAdmin
-                ? 'Update project details, status, or assigned PM.'
-                : 'Update project details or status.'}
+                ? 'Update project details, status, stage, or assigned PM.'
+                : 'Update project details, status, or stage.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -412,7 +461,7 @@ export function ProjectDetailPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <Label htmlFor="edit-project-client">Builder</Label>
+                <Label htmlFor="edit-project-client">Client</Label>
                 <Input id="edit-project-client" {...form.register('client')} />
               </div>
 
@@ -432,6 +481,21 @@ export function ProjectDetailPage() {
                 >
                   <option value="active">Active</option>
                   <option value="archived">Archived</option>
+                </select>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="edit-project-stage">Stage</Label>
+                <select
+                  id="edit-project-stage"
+                  {...form.register('stage')}
+                  className="flex h-9 w-full rounded-md border border-neutral-300 bg-white px-3 py-1 text-sm text-neutral-950 focus:outline-none focus:ring-2 focus:ring-neutral-950"
+                >
+                  {PROJECT_STAGES.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
                 </select>
               </div>
 
