@@ -8,6 +8,7 @@ begin;
 
 do $$
 declare
+  v_supplier uuid;
   v_pm uuid := '00000000-0000-0000-0000-000000000072';
   v_est uuid := '00000000-0000-0000-0000-000000000074';
   v_project uuid;
@@ -27,6 +28,8 @@ begin
   update public.profiles set role = 'pm' where id = v_pm;
   update public.profiles set role = 'estimator' where id = v_est;
 
+  insert into public.suppliers (name) values ('T SUPPLIER line_remarks') returning id into v_supplier;
+
   execute 'set local role authenticated';
   perform set_config('request.jwt.claims', json_build_object('sub', v_pm, 'role', 'authenticated')::text, true);
   insert into public.projects (reference_no, name, created_by, assigned_pm) values ('R001', 'Remark Tower', v_pm, v_pm)
@@ -34,7 +37,7 @@ begin
   insert into public.project_estimators (project_id, estimator_id, assigned_by) values (v_project, v_est, v_pm);
 
   perform set_config('request.jwt.claims', json_build_object('sub', v_est, 'role', 'authenticated')::text, true);
-  v_version := public.import_quotation(v_project, v_project::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
+  v_version := public.import_quotation(v_project, 'Builder A', v_supplier, v_project::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
 
   select l.mhqt_remarks into v_remarks from public.project_lines l join public.door_groups g on g.id = l.group_id
   where g.version_id = v_version and l.sku = 'H-1';

@@ -18,6 +18,7 @@ begin;
 
 do $$
 declare
+  v_supplier uuid;
   v_admin uuid := '00000000-0000-0000-0000-000000000041';
   v_pm uuid := '00000000-0000-0000-0000-000000000042';
   v_est uuid := '00000000-0000-0000-0000-000000000043';
@@ -43,6 +44,8 @@ begin
   update public.profiles set role = 'admin' where id = v_admin;
   update public.profiles set role = 'pm' where id = v_pm;
   update public.profiles set role = 'estimator' where id in (v_est, v_other);
+
+  insert into public.suppliers (name) values ('T SUPPLIER activity') returning id into v_supplier;
 
   execute 'set local role authenticated';
 
@@ -80,7 +83,7 @@ begin
 
   -- 2. Import: one entry, no line entries.
   perform set_config('request.jwt.claims', json_build_object('sub', v_est, 'role', 'authenticated')::text, true);
-  v_version := public.import_quotation(v_project, v_project::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
+  v_version := public.import_quotation(v_project, 'Builder A', v_supplier, v_project::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
 
   select * into v_row from public.project_activity where project_id = v_project and action = 'quotation_imported';
   if v_row.id is null or v_row.actor_id <> v_est or v_row.version_id <> v_version
@@ -94,6 +97,7 @@ begin
   -- 3. Line edits, grouped. Pretend the import happened an hour ago.
   execute 'reset role';
   update public.door_groups set created_at = now() - interval '1 hour' where version_id = v_version;
+  update public.quote_sheets set created_at = now() - interval '1 hour' where version_id = v_version;
   execute 'set local role authenticated';
 
   select l.id into v_line from public.project_lines l join public.door_groups g on g.id = l.group_id
@@ -148,7 +152,7 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', v_est, 'role', 'authenticated')::text, true);
   v_version2 := public.create_revision(v_version);
   if not exists (select 1 from public.project_activity where project_id = v_project and action = 'revision_started'
-                 and version_id = v_version2 and summary = 'started v2 from v1' and actor_id = v_est) then
+                 and version_id = v_version2 and summary = 'started Builder A v2 from v1' and actor_id = v_est) then
     raise exception 'TEST FAILED: Starting a revision was not logged!';
   end if;
   if exists (select 1 from public.project_activity where version_id = v_version2 and action = 'lines_edited') then
@@ -159,7 +163,7 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', v_pm, 'role', 'authenticated')::text, true);
   perform public.transition_version(v_version2, 'approve', 'Looks good');
   if not exists (select 1 from public.project_activity where project_id = v_project and action = 'version_approved'
-                 and version_id = v_version2 and actor_id = v_pm and summary = 'approved v2') then
+                 and version_id = v_version2 and actor_id = v_pm and summary = 'approved Builder A v2') then
     raise exception 'TEST FAILED: Approval was not logged!';
   end if;
 
