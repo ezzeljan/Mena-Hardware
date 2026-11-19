@@ -7,6 +7,9 @@ import { AppShell } from '@/components/layout/AppShell'
 
 // Each page is downloaded the first time it is opened, so the first load only
 // fetches the shell and the page being viewed.
+const DashboardPage = lazy(() =>
+  import('@/features/dashboard/DashboardPage').then((m) => ({ default: m.DashboardPage })),
+)
 const PartsLibraryPage = lazy(() =>
   import('@/features/parts/PartsLibraryPage').then((m) => ({ default: m.PartsLibraryPage })),
 )
@@ -38,6 +41,9 @@ const ProjectHardwarePage = lazy(() =>
     default: m.ProjectHardwarePage,
   })),
 )
+const AccountPage = lazy(() =>
+  import('@/features/account/AccountPage').then((m) => ({ default: m.AccountPage })),
+)
 const UsersPage = lazy(() =>
   import('@/features/users/UsersPage').then((m) => ({ default: m.UsersPage })),
 )
@@ -59,7 +65,9 @@ export default function App() {
           <Routes>
             <Route path="/login" element={<AuthPage />} />
             <Route element={<AppShell />}>
-              <Route index element={<Navigate to="/parts" replace />} />
+              <Route index element={<Navigate to="/dashboard" replace />} />
+              <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/account" element={<AccountPage />} />
               <Route path="/projects" element={<ProjectsPage />} />
               <Route path="/projects/:id" element={<ProjectDetailPage />} />
               <Route path="/projects/:id/hardware" element={<ProjectHardwarePage />} />
@@ -72,7 +80,7 @@ export default function App() {
               />
               <Route path="/users" element={<UsersPage />} />
             </Route>
-            <Route path="*" element={<Navigate to="/parts" replace />} />
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </BrowserRouter>
       </AuthProvider>

@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { UserPlus, Users, X } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/features/auth/AuthContext'
-import type { DirectoryProfile, ProjectEstimator } from '@/types/database'
+import type { ProjectEstimator } from '@/types/database'
+import { useProfileDirectory } from '@/features/account/useProfileDirectory'
+import { UserAvatar } from '@/components/avatar/UserAvatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
@@ -31,20 +33,7 @@ export function ProjectTeamPanel({
   const [selectedEstimator, setSelectedEstimator] = useState('')
   const [error, setError] = useState<string | null>(null)
 
-  const directoryQuery = useQuery({
-    queryKey: ['profile_directory', 'project-team'],
-    queryFn: async (): Promise<DirectoryProfile[]> => {
-      const { data, error: dirErr } = await supabase
-        .from('profile_directory')
-        .select('id, full_name, role')
-        .in('role', ['pm', 'estimator', 'admin'])
-        .order('full_name', { ascending: true })
-      if (dirErr) throw dirErr
-      return (data ?? []) as DirectoryProfile[]
-    },
-  })
-
-  const people = directoryQuery.data ?? []
+  const { people, byId } = useProfileDirectory()
   const nameOf = (id: string | null) => {
     if (!id) return 'Unassigned'
     const p = people.find((x) => x.id === id)
@@ -102,7 +91,7 @@ export function ProjectTeamPanel({
   const busy = addMutation.isPending || removeMutation.isPending
 
   return (
-    <div className="border border-neutral-300 bg-white p-4 rounded-md space-y-3">
+    <div className="h-full border border-neutral-300 bg-white p-4 rounded-md space-y-3">
       <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-neutral-500">
         <Users className="h-3.5 w-3.5" />
         <span>Project Team</span>
@@ -117,11 +106,20 @@ export function ProjectTeamPanel({
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-[160px_1fr] gap-x-4 gap-y-2 text-sm">
+      <div className="grid grid-cols-1 gap-y-1.5 text-sm">
         <div className="text-xs text-neutral-600 pt-1">Project Manager</div>
-        <div className="font-medium text-neutral-950">{nameOf(assignedPmId)}</div>
+        <div className="flex items-center gap-2 font-medium text-neutral-950">
+          {assignedPmId && (
+            <UserAvatar
+              name={byId.get(assignedPmId)?.full_name}
+              url={byId.get(assignedPmId)?.avatar_url}
+              size="sm"
+            />
+          )}
+          <span>{nameOf(assignedPmId)}</span>
+        </div>
 
-        <div className="text-xs text-neutral-600 pt-1">Estimators</div>
+        <div className="text-xs text-neutral-600 pt-3">Estimators</div>
         <div className="space-y-2">
           {estimators.length === 0 ? (
             <div className="text-xs text-neutral-600">
@@ -133,7 +131,12 @@ export function ProjectTeamPanel({
           ) : (
             <div className="flex flex-wrap gap-1.5">
               {estimators.map((e) => (
-                <Badge key={e.estimator_id} variant="outline" className="gap-1.5 text-xs">
+                <Badge key={e.estimator_id} variant="outline" className="gap-1.5 py-0.5 pl-0.5 text-xs">
+                  <UserAvatar
+                    name={byId.get(e.estimator_id)?.full_name}
+                    url={byId.get(e.estimator_id)?.avatar_url}
+                    size="xs"
+                  />
                   <span>{nameOf(e.estimator_id)}</span>
                   {canManage && (
                     <button
@@ -157,7 +160,7 @@ export function ProjectTeamPanel({
                 aria-label="Estimator to assign"
                 value={selectedEstimator}
                 onChange={(e) => setSelectedEstimator(e.target.value)}
-                className="h-8 w-full max-w-xs border border-neutral-300 bg-white px-2 text-xs text-neutral-950 focus:outline-none focus:ring-1 focus:ring-neutral-950"
+                className="h-8 w-full lg:w-44 border border-neutral-300 bg-white px-2 text-xs text-neutral-950 focus:outline-none focus:ring-1 focus:ring-neutral-950"
               >
                 <option value="">
                   {availableEstimators.length === 0

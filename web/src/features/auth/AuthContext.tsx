@@ -34,7 +34,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const fetchProfile = useCallback(async (userId: string) => {
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, full_name, email, role, created_at')
+      .select('id, full_name, email, role, avatar_url, created_at')
       .eq('id', userId)
       .maybeSingle()
 
@@ -46,6 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         full_name: '',
         email: '',
         role: 'viewer',
+        avatar_url: null,
         created_at: new Date().toISOString(),
       })
     }
