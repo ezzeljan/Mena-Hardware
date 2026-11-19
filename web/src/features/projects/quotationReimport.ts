@@ -59,5 +59,6 @@ export function carriedLinesPayload(lines: ProjectLine[]) {
       unit_price: l.unit_price,
       origin: l.origin,
       part_id: l.part_id,
+      mhqt_remarks: l.mhqt_remarks ?? '',
     }))
 }

@@ -7,6 +7,8 @@ export interface Profile {
   full_name: string
   email: string
   role: UserRole
+  /** Public URL of the profile photo (migration 015); null shows initials. */
+  avatar_url: string | null
   created_at: string
 }
 
@@ -63,7 +65,7 @@ export interface StandardSetLine {
 }
 
 /** Row of the profile_directory view: non-sensitive profile columns readable by any signed-in user. */
-export type DirectoryProfile = Pick<Profile, 'id' | 'full_name' | 'role'>
+export type DirectoryProfile = Pick<Profile, 'id' | 'full_name' | 'role' | 'avatar_url'>
 
 /** An estimator assigned to a project by its PM (or an admin). */
 export interface ProjectEstimator {
@@ -84,6 +86,9 @@ export type MatchStatus = 'auto' | 'confirmed' | 'manual' | 'unmatched'
 export type LineOrigin = 'set' | 'added' | 'edited'
 export type ApprovalAction = 'submit' | 'approve' | 'reject'
 
+/** Project stage (migration 017). */
+export type ProjectStage = 'tender' | 'awarded'
+
 export interface Project {
   id: string
   /** Reference No. (e.g. "SV002"); '' when none. */
@@ -92,6 +97,8 @@ export interface Project {
   client: string
   site: string
   status: ProjectStatus
+  /** Tender (default) or Awarded; changed by the assigned PM or an admin. */
+  stage: ProjectStage
   created_by: string
   assigned_pm: string | null
   created_at: string
@@ -164,7 +171,60 @@ export interface ProjectLine {
   unit_price: number | null
   origin: LineOrigin
   part_id: string | null
+  /** "MHQT REMARKS" column (migration 019); '' when empty. */
+  mhqt_remarks?: string
   created_at: string
+  updated_at: string
+}
+
+export type NotificationKind =
+  | 'assigned_estimator'
+  | 'assigned_pm'
+  | 'submitted'
+  | 'approved'
+  | 'changes_requested'
+  | 'comment'
+
+/** In-app notification (created by database triggers, migration 014). */
+export interface AppNotification {
+  id: string
+  user_id: string
+  project_id: string | null
+  version_id: string | null
+  kind: NotificationKind
+  title: string
+  body: string
+  actor_id: string | null
+  read_at: string | null
+  created_at: string
+}
+
+/** PM comment on a hardware schedule version (migration 018). */
+export interface VersionComment {
+  id: string
+  version_id: string
+  /** The door group it is about, or null for the whole schedule. */
+  door_group_id: string | null
+  author_id: string | null
+  body: string
+  created_at: string
+}
+
+export type ActivityCategory = 'project' | 'team' | 'quotation' | 'version' | 'hardware'
+
+/** Project activity log entry (written by database triggers, migration 016). */
+export interface ProjectActivity {
+  id: string
+  project_id: string
+  version_id: string | null
+  actor_id: string | null
+  category: ActivityCategory
+  action: string
+  /** Verb phrase without the actor, e.g. "approved v2". */
+  summary: string
+  details: Record<string, unknown>
+  created_at: string
+  /** Moves forward when more edits are grouped into the entry. */
   updated_at: string
 }
 

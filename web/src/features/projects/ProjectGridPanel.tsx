@@ -18,16 +18,32 @@ import type {
 } from '@/types/database'
 import { fetchVersionGroups, fetchVersionLines } from '@/features/projects/projectData'
 import { GridCellEditor } from '@/features/projects/GridCellEditor'
-import { GroupRowsFragment, type EditableCol } from '@/features/projects/ProjectGridGroupRows'
+import { ExportExcelDialog } from '@/features/projects/ExportExcelDialog'
+import {
+  GRID_COLUMNS,
+  GroupRowsFragment,
+  LAST_EDITABLE_COL,
+  type EditableCol,
+  type LineManufacturer,
+} from '@/features/projects/ProjectGridGroupRows'
+import { DELIVERY_PER_DOOR } from '@/features/projects/pricing'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
 interface ProjectGridPanelProps {
+  /** Display name with reference no. (file name, title strip). */
   projectName: string
-  builderName: string
+  /** Project name without the reference no. ("Project:" row of the export). */
+  projectTitle?: string
+  clientName: string
   activeVersion: ProjectVersion | null
   canEdit: boolean
-  canEditPmRemarks?: boolean
+  /** PM comment count per door group (shown on the group rows). */
+  commentCounts?: Map<string, number>
+  /** Open the comments drawer for a door group. */
+  onOpenComments?: (groupId: string) => void
+  /** Door group to scroll to and highlight briefly (from the comments drawer). */
+  highlightGroupId?: string | null
   /**
    * Receives a function that saves all pending edits now and resolves true when
    * nothing is left unsaved. Used to save before submitting (B6).
@@ -39,23 +55,26 @@ type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error'
 
 export function ProjectGridPanel({
   projectName,
-  builderName,
+  projectTitle,
+  clientName,
   activeVersion,
   canEdit,
-  canEditPmRemarks = false,
+  commentCounts,
+  onOpenComments,
+  highlightGroupId = null,
   onRegisterSavePending,
 }: ProjectGridPanelProps) {
   const queryClient = useQueryClient()
   const isDraft = activeVersion?.status === 'draft'
   const editable = canEdit && isDraft
-  const pmRemarksEditable =
-    canEditPmRemarks && activeVersion?.status === 'submitted'
 
   const [lines, setLines] = useState<ProjectLine[]>([])
   const [markupPct, setMarkupPct] = useState<number>(15)
   const [markupInput, setMarkupInput] = useState<string>('15.00')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
   const [exporting, setExporting] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [focusedCell, setFocusedCell] = useState<{
     lineId: string
@@ -96,7 +115,7 @@ export function ProjectGridPanel({
         supabase
           .from('parts')
           .select(
-            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
+            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at, manufacturers(id, name, is_owner_supplied)',
           )
           .eq('active', true)
           .order('sku', { ascending: true })
@@ -106,6 +125,13 @@ export function ProjectGridPanel({
   })
 
   const parts = useMemo(() => partsQuery.data ?? [], [partsQuery.data])
+  const partLookups = useMemo(
+    () => ({
+      partById: new Map(parts.map((p) => [p.id, p])),
+      partBySku: new Map(parts.map((p) => [p.sku.trim().toUpperCase(), p])),
+    }),
+    [parts],
+  )
 
   useEffect(() => {
     if (projectLinesQuery.data && dirtyIdsRef.current.size === 0) {
@@ -140,6 +166,7 @@ export function ProjectGridPanel({
           unit_price: line.unit_price,
           origin: line.origin,
           part_id: line.part_id,
+          mhqt_remarks: line.mhqt_remarks ?? '',
         },
       ]
     })
@@ -266,7 +293,7 @@ export function ProjectGridPanel({
       else if (col === 2) initial = String(line.qty_per_door)
       else if (col === 3) {
         initial = line.unit_price === null ? '' : String(line.unit_price)
-      }
+      } else if (col === 4) initial = line.mhqt_remarks ?? ''
       setEditingCell({ lineId: line.id, col, initial })
     },
     [editable],
@@ -311,6 +338,12 @@ export function ProjectGridPanel({
             origin: line.origin === 'added' ? 'added' : 'edited',
           }
         }
+      } else if (col === 4) {
+        // Remarks don't change the hardware, so the line keeps its origin.
+        const nextRemarks = rawVal.trim().slice(0, 500)
+        if (nextRemarks !== (line.mhqt_remarks ?? '')) {
+          updated = { ...line, mhqt_remarks: nextRemarks }
+        }
       }
 
       if (updated) {
@@ -345,11 +378,11 @@ export function ProjectGridPanel({
       if (rowIdx === -1) return
       let nextRow = rowIdx + dRow
       let nextCol = col + dCol
-      if (nextCol > 3) {
+      if (nextCol > LAST_EDITABLE_COL) {
         nextCol = 0
         nextRow += 1
       } else if (nextCol < 0) {
-        nextCol = 3
+        nextCol = LAST_EDITABLE_COL
         nextRow -= 1
       }
       if (nextRow < 0 || nextRow >= flatLineIds.length) return
@@ -381,7 +414,7 @@ export function ProjectGridPanel({
         part_id: null,
       })
       .select(
-        'id, group_id, position, sku, description, qty_per_door, unit_price, origin, part_id, created_at, updated_at',
+        'id, group_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, created_at, updated_at',
       )
       .single()
 
@@ -474,24 +507,9 @@ export function ProjectGridPanel({
     }
   }, [activeVersion])
 
-  const handleSavePmRemark = async (groupId: string, remarks: string) => {
-    if (!pmRemarksEditable) return
-    setSaveStatus('saving')
-    setSaveError(null)
-    const { error } = await supabase.rpc('update_door_group_pm_remark', {
-      p_group_id: groupId,
-      p_remarks: remarks,
-    })
-    if (error) {
-      setSaveStatus('error')
-      setSaveError(error.message)
-      return
-    }
-    setSaveStatus('saved')
-    await queryClient.invalidateQueries({
-      queryKey: ['door_groups', activeVersion?.id],
-    })
-  }
+  // LEGEND / MANUFACTURER columns: from the line's library part (by id, else SKU).
+  // Built once per parts load (hooks must stay above the early return).
+  const { partById, partBySku } = partLookups
 
   if (!activeVersion) return null
 
@@ -504,6 +522,16 @@ export function ProjectGridPanel({
     return sum + Number(l.qty_per_door) * dQty * Number(l.unit_price)
   }, 0)
   const projectTotalWithMarkup = projectTotal * markupFactor
+  const deliveries = totalDoors * DELIVERY_PER_DOOR
+  const totalExGst = projectTotalWithMarkup + deliveries
+
+  const manufacturerOf = (line: ProjectLine): LineManufacturer | null => {
+    const part =
+      (line.part_id ? partById.get(line.part_id) : undefined) ??
+      partBySku.get(line.sku.trim().toUpperCase())
+    const m = part?.manufacturers
+    return m ? { name: m.name, ownerSupplied: m.is_owner_supplied } : null
+  }
 
   const renderEditableCell = (
     line: ProjectLine,
@@ -616,16 +644,21 @@ export function ProjectGridPanel({
           No door groups in this version yet.
         </div>
       ) : (
-        <div className="border border-neutral-400 bg-white overflow-x-auto">
+        <div className="border border-neutral-400 bg-white">
           {/* Excel-style Workbook Title Strip */}
           <div className="flex flex-wrap items-center justify-between gap-4 px-3 py-2.5 border-b border-neutral-400 bg-white">
-            <div>
-              <div className="text-sm font-bold tracking-tight text-neutral-950 uppercase">
-                DOOR HARDWARE SET — {projectName}
+            {/* Same header rows as the Excel export (rows 2-4); the sheet title
+                and schedule # are only chosen when exporting. */}
+            <div className="space-y-0.5">
+              <div className="text-sm font-bold uppercase text-neutral-600">
+                Project: {(projectTitle || projectName).toUpperCase()}
               </div>
-              <div className="text-[11px] text-neutral-600">
-                {builderName || 'Mena Contractors'} • v{activeVersion.version_no} (
-                {activeVersion.status.toUpperCase()})
+              <div className="text-sm font-bold uppercase text-neutral-600">
+                Client: {(clientName || '').toUpperCase()}
+              </div>
+              <div className="text-sm font-bold text-neutral-600">Schedule #:</div>
+              <div className="pt-0.5 text-[11px] text-neutral-500">
+                v{activeVersion.version_no} ({activeVersion.status.toUpperCase()})
                 {editable &&
                   ' • Arrow keys move, Enter/F2 edit, Tab next, Esc cancel'}
               </div>
@@ -737,32 +770,32 @@ export function ProjectGridPanel({
                 </span>
               </div>
 
+              <div className="flex items-center border border-neutral-400">
+                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
+                  DELIVERIES:
+                </span>
+                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
+                  {formatCurrency(deliveries)}
+                </span>
+              </div>
+
+              <div className="flex items-center border border-neutral-950">
+                <span className="px-2 py-1 bg-sky-100 font-semibold text-neutral-950 border-r border-neutral-950">
+                  TOTAL EX. GST:
+                </span>
+                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950" data-testid="grid-total-ex-gst">
+                  {formatCurrency(totalExGst)}
+                </span>
+              </div>
+
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 disabled={exporting || groups.length === 0}
-                onClick={async () => {
-                  setExporting(true)
-                  setSaveError(null)
-                  try {
-                    const { downloadProjectExcel } = await import(
-                      '@/features/projects/projectExcelExport'
-                    )
-                    await downloadProjectExcel({
-                      projectName,
-                      builderName,
-                      version: { ...activeVersion, markup_pct: markupPct },
-                      groups,
-                      lines,
-                    })
-                  } catch (err) {
-                    setSaveError(
-                      err instanceof Error ? err.message : 'Failed to export Excel.',
-                    )
-                  } finally {
-                    setExporting(false)
-                  }
+                onClick={() => {
+                  setExportError(null)
+                  setExportOpen(true)
                 }}
               >
                 <Download className="h-3.5 w-3.5" />
@@ -771,46 +804,28 @@ export function ProjectGridPanel({
             </div>
           </div>
 
-          {/* Single Connected Excel Grid */}
+          {/*
+            Single Connected Excel Grid. It scrolls inside a box that fits the
+            screen, so the horizontal scrollbar and the column headers stay in
+            view instead of only at the bottom / top of a long schedule.
+          */}
+          <div
+            className="max-h-[max(18rem,calc(100dvh_-_9rem))] overflow-auto"
+            data-testid="hardware-grid-scroll"
+          >
           <table className="w-auto border-collapse text-xs">
-            <thead className="sticky top-0 z-10 bg-neutral-200 text-neutral-950">
+            <thead className="sticky top-0 z-10 bg-neutral-200 text-neutral-950 shadow-[0_1px_0_0_#a3a3a3]">
               <tr>
-                <th className="border border-neutral-400 px-2 py-1.5 text-left font-bold uppercase tracking-wider whitespace-nowrap">
-                  ROOM NAME
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-left font-bold uppercase tracking-wider whitespace-nowrap">
-                  DOOR TAG
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-left font-bold uppercase tracking-wider whitespace-nowrap">
-                  DOOR SIZE
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-left font-bold uppercase tracking-wider whitespace-nowrap">
-                  DOOR CLASSIFICATION
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-left font-bold uppercase tracking-wider whitespace-nowrap">
-                  LEAFS
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-left font-bold uppercase tracking-wider whitespace-nowrap">
-                  PART NUMBER (SKU)
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-left font-bold uppercase tracking-wider whitespace-nowrap">
-                  HARDWARE DESCRIPTION
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-right font-bold uppercase tracking-wider whitespace-nowrap">
-                  QTY
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-right font-bold uppercase tracking-wider whitespace-nowrap">
-                  PRICE
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-right font-bold uppercase tracking-wider whitespace-nowrap">
-                  COST
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-right font-bold uppercase tracking-wider whitespace-nowrap">
-                  COST + MARKUP
-                </th>
-                <th className="border border-neutral-400 px-2 py-1.5 text-left font-bold uppercase tracking-wider whitespace-nowrap">
-                  PM REMARKS
-                </th>
+                {GRID_COLUMNS.map((c) => (
+                  <th
+                    key={c.label}
+                    className={`border border-neutral-400 px-2 py-1.5 font-bold uppercase tracking-wider whitespace-nowrap ${
+                      c.align === 'right' ? 'text-right' : c.align === 'center' ? 'text-center' : 'text-left'
+                    } ${c.label === 'MHQT REMARKS' ? 'bg-yellow-200' : ''}`}
+                  >
+                    {c.label}
+                  </th>
+                ))}
                 {editable && (
                   <th className="border border-neutral-400 px-2 py-1.5 text-center font-bold uppercase tracking-wider whitespace-nowrap">
                     ACTIONS
@@ -821,16 +836,6 @@ export function ProjectGridPanel({
             <tbody>
               {groups.map((group) => {
                 const groupLines = linesByGroup.get(group.id) ?? []
-                const groupCost = groupLines.reduce((sum, l) => {
-                  if (l.unit_price === null) return sum
-                  return (
-                    sum +
-                    Number(l.qty_per_door) *
-                      Number(group.door_qty) *
-                      Number(l.unit_price)
-                  )
-                }, 0)
-
                 const doorTag =
                   group.door_tag ||
                   (group.match_status === 'manual' &&
@@ -845,11 +850,12 @@ export function ProjectGridPanel({
                     group={group}
                     doorTag={doorTag}
                     groupLines={groupLines}
-                    groupCost={groupCost}
                     markupFactor={markupFactor}
+                    manufacturerOf={manufacturerOf}
                     editable={editable}
-                    pmRemarksEditable={pmRemarksEditable}
-                    onSavePmRemark={(val) => void handleSavePmRemark(group.id, val)}
+                    commentCount={commentCounts?.get(group.id) ?? 0}
+                    onOpenComments={onOpenComments ? () => onOpenComments(group.id) : undefined}
+                    highlighted={highlightGroupId === group.id}
                     renderEditableCell={renderEditableCell}
                     onAddLine={() => void handleAddLine(group.id)}
                     onDeleteLine={(line) => void handleDeleteLine(line)}
@@ -861,7 +867,43 @@ export function ProjectGridPanel({
               })}
             </tbody>
           </table>
+          </div>
         </div>
+      )}
+
+      {activeVersion && (
+        <ExportExcelDialog
+          open={exportOpen}
+          onOpenChange={setExportOpen}
+          projectId={activeVersion.project_id}
+          busy={exporting}
+          error={exportError}
+          onExport={async ({ scheduleNo, sheetTitle }) => {
+            setExporting(true)
+            setExportError(null)
+            try {
+              const { downloadProjectExcel } = await import(
+                '@/features/projects/projectExcelExport'
+              )
+              await downloadProjectExcel({
+                projectName,
+                projectTitle,
+                clientName,
+                scheduleNo,
+                sheetTitle,
+                version: { ...activeVersion, markup_pct: markupPct },
+                groups,
+                lines,
+                parts,
+              })
+              setExportOpen(false)
+            } catch (err) {
+              setExportError(err instanceof Error ? err.message : 'Failed to export Excel.')
+            } finally {
+              setExporting(false)
+            }
+          }}
+        />
       )}
     </div>
   )
