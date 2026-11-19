@@ -24,14 +24,13 @@ describe('Door Hardware Seed Parser', () => {
     )
   })
 
-  it('parses all standard sets, parts, and flags the KITCHEN (FIRE RATED - PIVOT) data issue', () => {
-    const result = parseHardwareWorkbook(xlsxPath)
+  it('parses all 65 standard sets, preserves null unit costs, and reports only genuine SKU mismatches', async () => {
+    const result = await parseHardwareWorkbook(xlsxPath)
     console.log('\n' + formatSeedReport(result))
 
-    expect(result.sets.length).toBeGreaterThan(0)
-    expect(result.dataIssues.length).toBe(1)
-    expect(result.dataIssues[0]?.room_name).toBe('KITCHEN')
-    expect(result.dataIssues[0]?.classification).toBe('FIRE RATED - PIVOT')
+    expect(result.sets.length).toBe(65)
+    expect(result.parts.length).toBe(59)
+    expect(result.dataIssues.length).toBe(0)
 
     // Ensure the 2 MM parts with no unit price remain null, not 0
     const closer1 = result.parts.find((p) => p.sku === '505BC+SLC')
@@ -39,5 +38,11 @@ describe('Door Hardware Seed Parser', () => {
     expect(closer1?.unit_cost).toBeNull()
     expect(closer2?.unit_cost).toBeNull()
     expect(closer1?.manufacturer).toBe('MM')
+
+    // Ensure KITCHEN (FIRE RATED - PIVOT) parts are now included since SKUs match descriptions
+    expect(result.parts.find((p) => p.sku === 'STRAIGHTPULL')?.description).toBe('STRAIGHT PULL')
+    expect(result.parts.find((p) => p.sku === 'FLRSPRGNHODC')?.description).toBe(
+      'FLOOR SPRING NHO HO & DA COMPLETE',
+    )
   })
 })

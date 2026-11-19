@@ -24,9 +24,11 @@ enabled = true
 site_url = "http://127.0.0.1:5173"
 additional_redirect_urls = ["http://localhost:5173"]
 jwt_expiry = 3600
-enable_signup = true
+# Public sign-up is OFF: every signed-in user can read pricing. Add users from
+# Studio / Dashboard -> Authentication -> Add user (or invite), then set their role in /users.
+enable_signup = false
 
 [auth.email]
-enable_signup = true
+enable_signup = false
 double_confirm_changes = false
 enable_confirmations = false

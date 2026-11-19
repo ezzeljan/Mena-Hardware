@@ -24,6 +24,7 @@ import {
   Search,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { fetchAllRows } from '@/lib/fetchAll'
 import { useAuth } from '@/features/auth/AuthContext'
 import {
   parseNullablePriceInput,
@@ -68,6 +69,7 @@ export function PartsLibraryPage() {
   const [editingPart, setEditingPart] = useState<Part | null>(null)
   const [historyPart, setHistoryPart] = useState<Part | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const form = useForm<PartFormValues>({
     resolver: zodResolver(partFormSchema),
@@ -94,16 +96,17 @@ export function PartsLibraryPage() {
 
   const partsQuery = useQuery({
     queryKey: ['parts'],
-    queryFn: async (): Promise<Part[]> => {
-      const { data, error } = await supabase
-        .from('parts')
-        .select(
-          'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at, manufacturers(id, name, is_owner_supplied)',
-        )
-        .order('sku', { ascending: true })
-      if (error) throw error
-      return (data ?? []) as unknown as Part[]
-    },
+    queryFn: (): Promise<Part[]> =>
+      fetchAllRows<Part>((from, to) =>
+        supabase
+          .from('parts')
+          .select(
+            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at, manufacturers(id, name, is_owner_supplied)',
+          )
+          .order('sku', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, to),
+      ),
   })
 
   const priceHistoryQuery = useQuery({
@@ -169,7 +172,11 @@ export function PartsLibraryPage() {
       if (error) throw error
     },
     onSuccess: async () => {
+      setActionError(null)
       await queryClient.invalidateQueries({ queryKey: ['parts'] })
+    },
+    onError: (err: Error) => {
+      setActionError(err.message)
     },
   })
 
@@ -350,7 +357,16 @@ export function PartsLibraryPage() {
                     variant="outline"
                     size="sm"
                     title={part.active ? 'Deactivate part' : 'Reactivate part'}
-                    onClick={() => toggleActiveMutation.mutate(part)}
+                    disabled={toggleActiveMutation.isPending}
+                    onClick={() => {
+                      if (
+                        part.active &&
+                        !window.confirm(`Deactivate part ${part.sku}?`)
+                      ) {
+                        return
+                      }
+                      toggleActiveMutation.mutate(part)
+                    }}
                   >
                     {part.active ? (
                       <>
@@ -468,6 +484,15 @@ export function PartsLibraryPage() {
           Showing {filteredParts.length} part{filteredParts.length === 1 ? '' : 's'}
         </div>
       </div>
+
+      {actionError && (
+        <div
+          role="alert"
+          className="border border-neutral-950 bg-neutral-100 p-3 text-xs font-medium text-neutral-950"
+        >
+          Action failed: {actionError}
+        </div>
+      )}
 
       {/* Table State */}
       {partsQuery.isLoading ? (

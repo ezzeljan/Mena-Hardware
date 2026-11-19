@@ -54,10 +54,21 @@ export function SkuAutocomplete({
     return () => document.removeEventListener('mousedown', handleOutsideClick)
   }, [])
 
+  const listboxId = id ? `${id}-listbox` : 'sku-autocomplete-listbox'
+  const isListboxOpen = open && matches.length > 0
+  const activeOption = isListboxOpen ? matches[highlightedIndex] : undefined
+
   return (
     <div ref={containerRef} className="relative">
       <Input
         id={id}
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={isListboxOpen}
+        aria-controls={listboxId}
+        aria-activedescendant={
+          activeOption ? `${listboxId}-opt-${activeOption.id}` : undefined
+        }
         value={value}
         placeholder={placeholder}
         autoComplete="off"
@@ -89,8 +100,9 @@ export function SkuAutocomplete({
         }}
       />
 
-      {open && matches.length > 0 && (
+      {isListboxOpen && (
         <ul
+          id={listboxId}
           role="listbox"
           aria-label="Part suggestions"
           className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-md border border-neutral-300 bg-white py-1 shadow-lg text-xs"
@@ -100,6 +112,7 @@ export function SkuAutocomplete({
             return (
               <li
                 key={part.id}
+                id={`${listboxId}-opt-${part.id}`}
                 role="option"
                 aria-selected={isHighlighted}
                 onMouseDown={(e) => {
