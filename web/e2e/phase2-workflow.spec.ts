@@ -703,6 +703,10 @@ async function importQuotation(page: Page) {
   await dialog.getByLabel('Builder').fill(BUILDER)
   await dialog.getByLabel('First supplier sheet').selectOption({ label: 'MM' })
   await dialog.getByRole('button', { name: 'Continue to upload' }).click()
+  // The wizard has its own page.
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/${PROJECT_ID}/import\\?builder=Mena%20Builders&supplier=${SUPPLIER_ID}$`),
+  )
   await expect(page.getByText(`Upload ${BUILDER}'s quotation`)).toBeVisible()
 
   // Step 1: upload
@@ -959,6 +963,7 @@ test('Assigned estimator re-imports an updated quotation: unchanged groups keep 
   await expect(page.getByRole('heading', { name: PROJECT_NAME })).toBeVisible()
 
   await page.getByRole('button', { name: 'Re-import Quotation' }).click()
+  await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/import\\?quote=${QUOTE_ID}$`))
   await expect(page.getByRole('heading', { name: 'Re-import Quotation' })).toBeVisible()
 
   // Updated file: fire egress qty 2 -> 4, plus a new bathroom group.
@@ -980,6 +985,8 @@ test('Assigned estimator re-imports an updated quotation: unchanged groups keep 
   await page.getByRole('button', { name: 'Next' }).click()
   await page.getByRole('button', { name: 'Create Version 2' }).click()
 
+  // Back on the quote page with the new version.
+  await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/hardware\\?quote=${QUOTE_ID}$`))
   await expect(page.getByRole('heading', { name: 'Re-import Quotation' })).toHaveCount(0)
 
   expect(state.lastReimport!.p_quote_id).toBe(QUOTE_ID)
@@ -1462,4 +1469,50 @@ test('Awarded project: the other quotes are read-only and no quote can be added'
     BUILDER,
     'Bolt Construct (awarded)',
   ])
+})
+
+test('Import page: Confirm All Auto confirms low-confidence matches too (after asking)', async ({ page }) => {
+  // A plant room door only loosely matches the fire egress set (low confidence).
+  const PLANT_ROW = [
+    'Level 02', 'DR-003', 'A02', 'Plant Room', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2040, 820, '-', 1, '', '', 1,
+  ]
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/import?builder=Bolt%20Construct&supplier=${SUPPLIER_ID}`)
+  await expect(page.getByRole('heading', { name: 'Import Quotation' })).toBeVisible()
+  await expect(page.getByText("Upload Bolt Construct's quotation")).toBeVisible()
+
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'Bolt.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: await buildSampleQuotationBuffer([FIRE_ROW(2), PLANT_ROW]),
+  })
+  await expect(page.getByText('Selected: Bolt.xlsx')).toBeVisible()
+  await page.getByRole('button', { name: 'Next' }).click()
+
+  // Only the confident match can be bulk-confirmed with the existing button.
+  await expect(page.getByRole('button', { name: /Confirm Auto Matches \(1\)/ })).toBeVisible()
+  const confirmAll = page.getByRole('button', { name: /Confirm All Auto \(2\)/ })
+  await expect(confirmAll).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Next' })).toBeEnabled()
+
+  // It asks first because a low-confidence match is included; dismissing changes nothing.
+  page.once('dialog', (d) => void d.dismiss())
+  await confirmAll.click()
+  await expect(confirmAll).toBeVisible()
+
+  page.once('dialog', (d) => {
+    expect(d.message()).toContain('including 1 below 72%')
+    void d.accept()
+  })
+  await confirmAll.click()
+  await expect(page.getByRole('button', { name: /Confirm All Auto \(0\)/ })).toBeDisabled()
+  await expect(page.getByText(/low-confidence match/)).toHaveCount(0)
+
+  // Cancel goes back to the project overview.
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}$`))
 })

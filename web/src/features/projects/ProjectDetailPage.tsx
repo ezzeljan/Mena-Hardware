@@ -21,9 +21,8 @@ import type { Profile } from '@/types/database'
 import { ProjectActivityPanel } from '@/features/projects/ProjectActivityPanel'
 import { StageBadge, StageSelect } from '@/features/projects/ProjectStage'
 import { ProjectTeamPanel } from '@/features/projects/ProjectTeamPanel'
-import { QuotationImportWizard } from '@/features/projects/QuotationImportWizard'
 import { HardwareQuotesPanel } from '@/features/projects/HardwareQuotesPanel'
-import { NewQuoteDialog, type NewQuoteChoice } from '@/features/projects/NewQuoteDialog'
+import { NewQuoteDialog } from '@/features/projects/NewQuoteDialog'
 import { useSupplierOptions } from '@/features/projects/useSuppliers'
 import { deleteProjectWithStorage } from '@/features/projects/deleteProject'
 import { useProjectDetail } from '@/features/projects/useProjectDetail'
@@ -89,9 +88,8 @@ export function ProjectDetailPage() {
   const [formError, setFormError] = useState<string | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
-  // New quote: builder + first supplier (dialog), then the import wizard.
+  // New quote: builder + first supplier (dialog), then the import page.
   const [newQuoteOpen, setNewQuoteOpen] = useState(false)
-  const [newQuote, setNewQuote] = useState<NewQuoteChoice | null>(null)
   const suppliersQuery = useSupplierOptions(project?.stage === 'awarded')
 
   const form = useForm<ProjectFormValues>({
@@ -310,9 +308,9 @@ export function ProjectDetailPage() {
             projectId={project.id}
             quotes={quotes}
             awardedSupplierName={awardedSupplierName}
-            canAddQuote={canAddQuote && !newQuote}
+            canAddQuote={canAddQuote}
             canEditContent={canEditContent}
-            addQuoteHint={newQuote ? 'Importing below.' : addQuoteHint}
+            addQuoteHint={addQuoteHint}
             onNewQuote={() => setNewQuoteOpen(true)}
           />
         </div>
@@ -320,28 +318,16 @@ export function ProjectDetailPage() {
         <ProjectActivityPanel projectId={project.id} className="lg:col-span-2 xl:col-span-1" />
       </div>
 
-      {/* The import wizard needs the full page width */}
-      {newQuote && canEditContent && (
-        <QuotationImportWizard
-          projectId={project.id}
-          projectName={displayName}
-          builderName={newQuote.builderName}
-          supplier={newQuote.supplier}
-          onCancel={() => setNewQuote(null)}
-          onDone={(versionId) => {
-            setNewQuote(null)
-            navigate(`/projects/${project.id}/hardware?version=${versionId}`)
-          }}
-        />
-      )}
-
       <NewQuoteDialog
         open={newQuoteOpen}
         onOpenChange={setNewQuoteOpen}
         existingBuilders={quotes.map((q) => q.builder_name)}
         onConfirm={(choice) => {
           setNewQuoteOpen(false)
-          setNewQuote(choice)
+          // The import wizard has its own page.
+          navigate(
+            `/projects/${project.id}/import?builder=${encodeURIComponent(choice.builderName)}&supplier=${choice.supplier.id}`,
+          )
         }}
       />
 

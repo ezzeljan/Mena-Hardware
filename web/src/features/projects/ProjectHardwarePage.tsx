@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, GitBranch, Lock, MessageSquare, Trophy, Upload } from 'lucide-react'
 import { projectDisplayName } from '@/lib/projectName'
@@ -7,7 +7,6 @@ import { ProjectGridPanel } from '@/features/projects/ProjectGridPanel'
 import { SheetTabs } from '@/features/projects/SheetTabs'
 import { VersionsDiffDialog } from '@/features/projects/VersionsDiffDialog'
 import { ApprovalBar } from '@/features/projects/ApprovalBar'
-import { QuotationImportWizard } from '@/features/projects/QuotationImportWizard'
 import { canReviseFrom } from '@/features/projects/versionActions'
 import { useProjectDetail } from '@/features/projects/useProjectDetail'
 import { fetchVersionGroups, fetchVersionSheets } from '@/features/projects/projectData'
@@ -29,12 +28,12 @@ export function ProjectHardwarePage() {
   const { id } = useParams<{ id: string }>()
   const { projectQuery, project, quotes, canEditContent, canReview } = useProjectDetail(id)
   const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
 
   const [versionsOpen, setVersionsOpen] = useState(false)
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(
     searchParams.get('version'),
   )
-  const [reimportOpen, setReimportOpen] = useState(false)
   const [reimportError, setReimportError] = useState<string | null>(null)
   // PM comments drawer (?comments=open&version=… opens it, e.g. from a notification).
   const [commentsOpen, setCommentsOpen] = useState(searchParams.get('comments') === 'open')
@@ -186,7 +185,6 @@ export function ProjectHardwarePage() {
   // Re-import: into the draft if there is one, otherwise as the next revision
   // of an approved / changes-requested latest version. Not while under review.
   const reimportBase = draftVersion ?? versions[0] ?? null
-  const nextVersionNo = Math.max(0, ...versions.map((v) => v.version_no)) + 1
   const canReimport =
     canEditQuote &&
     !versions.some((v) => v.status === 'submitted') &&
@@ -200,7 +198,6 @@ export function ProjectHardwarePage() {
 
   const selectQuote = (quoteId: string) => {
     setSelectedVersionId(null)
-    setReimportOpen(false)
     const next = new URLSearchParams(searchParams)
     next.set('quote', quoteId)
     setSearchParams(next)
@@ -216,7 +213,8 @@ export function ProjectHardwarePage() {
       )
       return
     }
-    setReimportOpen(true)
+    // The import wizard has its own page.
+    navigate(`/projects/${project.id}/import?quote=${activeQuote.id}`)
   }
 
   return (
@@ -289,15 +287,15 @@ export function ProjectHardwarePage() {
             aria-pressed={commentsOpen}
           >
             <MessageSquare className="h-3.5 w-3.5" />
-            <span>PM Comments ({commentTotal})</span>
+            <span>Comments ({commentTotal})</span>
           </Button>
-          {canReimport && !reimportOpen && (
+          {canReimport && (
             <Button variant="outline" size="sm" onClick={() => void openReimport()}>
               <Upload className="h-3.5 w-3.5" />
               <span>Re-import Quotation</span>
             </Button>
           )}
-          {!reimportOpen && !locked && (
+          {!locked && (
             // Version status note + Submit / Approve / Request Changes / New Draft.
             <ApprovalBar
               projectId={project.id}
@@ -312,62 +310,44 @@ export function ProjectHardwarePage() {
         </div>
       </div>
 
-      {reimportOpen && reimportBase ? (
-        <QuotationImportWizard
-          mode="reimport"
-          projectId={project.id}
-          projectName={`${displayName} — ${activeQuote.builder_name}`}
-          quoteId={activeQuote.id}
-          baseVersion={reimportBase}
-          nextVersionNo={nextVersionNo}
-          onCancel={() => setReimportOpen(false)}
-          onDone={(vid) => {
-            setReimportOpen(false)
-            setSelectedVersionId(vid)
-          }}
-        />
-      ) : (
-        <>
-          {reimportError && (
-            <div
-              role="alert"
-              className="border border-neutral-950 bg-neutral-50 p-3 text-xs text-neutral-950"
-            >
-              {reimportError}
-            </div>
-          )}
-
-          <div>
-            <ProjectGridPanel
-              projectName={displayName}
-              projectTitle={project.name}
-              clientName={activeQuote.builder_name}
-              activeVersion={activeVersion}
-              sheet={currentSheet}
-              sheets={sheets}
-              canEdit={canEditQuote}
-              commentCounts={commentCounts}
-              onOpenComments={(groupId) => openComments(groupId)}
-              highlightGroupId={highlightGroupId}
-              onRegisterSavePending={registerSavePending}
-            />
-            {activeVersion && sheets.length > 0 && (
-              <SheetTabs
-                versionId={activeVersion.id}
-                sheets={sheets}
-                activeSheetId={currentSheet?.id ?? null}
-                onSelect={(sheetId) => {
-                  const s = sheets.find((x) => x.id === sheetId)
-                  setActiveSheet({ id: sheetId, supplierId: s?.supplier_id ?? '' })
-                }}
-                editable={canEditQuote && activeVersion.status === 'draft'}
-                commentCounts={commentCountsBySheet}
-                savePendingEdits={savePendingEdits}
-              />
-            )}
-          </div>
-        </>
+      {reimportError && (
+        <div
+          role="alert"
+          className="border border-neutral-950 bg-neutral-50 p-3 text-xs text-neutral-950"
+        >
+          {reimportError}
+        </div>
       )}
+
+      <div>
+        <ProjectGridPanel
+          projectName={displayName}
+          projectTitle={project.name}
+          clientName={activeQuote.builder_name}
+          activeVersion={activeVersion}
+          sheet={currentSheet}
+          sheets={sheets}
+          canEdit={canEditQuote}
+          commentCounts={commentCounts}
+          onOpenComments={(groupId) => openComments(groupId)}
+          highlightGroupId={highlightGroupId}
+          onRegisterSavePending={registerSavePending}
+        />
+        {activeVersion && sheets.length > 0 && (
+          <SheetTabs
+            versionId={activeVersion.id}
+            sheets={sheets}
+            activeSheetId={currentSheet?.id ?? null}
+            onSelect={(sheetId) => {
+              const s = sheets.find((x) => x.id === sheetId)
+              setActiveSheet({ id: sheetId, supplierId: s?.supplier_id ?? '' })
+            }}
+            editable={canEditQuote && activeVersion.status === 'draft'}
+            commentCounts={commentCountsBySheet}
+            savePendingEdits={savePendingEdits}
+          />
+        )}
+      </div>
 
       <VersionCommentsDrawer
         open={commentsOpen}

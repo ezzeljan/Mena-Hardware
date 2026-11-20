@@ -371,6 +371,24 @@ export function QuotationImportWizard({
     )
   }
 
+  // Every AUTO match that has a set, low-confidence ones included (asks first).
+  const confirmEveryAuto = () => {
+    if (
+      lowConfidenceAutoCount > 0 &&
+      !window.confirm(
+        `Confirm all ${allAutoWithSetCount} auto matches, including ${lowConfidenceAutoCount} below ${Math.round(AUTO_MATCH_THRESHOLD * 100)}%? Check those matches first if you're not sure.`,
+      )
+    ) {
+      return
+    }
+    setStepError(null)
+    setDraftMatches((prev) =>
+      prev.map((item) =>
+        item.matchStatus === 'auto' && item.matchedSetId ? { ...item, matchStatus: 'confirmed' } : item,
+      ),
+    )
+  }
+
   const confirmOne = (groupKey: string) => {
     setStepError(null)
     setDraftMatches((prev) =>
@@ -456,6 +474,9 @@ export function QuotationImportWizard({
   const autoCount = draftMatches.filter((m) => m.matchStatus === 'auto').length
   const highConfidenceAutoCount = draftMatches.filter(isHighConfidenceAuto).length
   const lowConfidenceAutoCount = autoCount - highConfidenceAutoCount
+  const allAutoWithSetCount = draftMatches.filter(
+    (m) => m.matchStatus === 'auto' && m.matchedSetId !== null,
+  ).length
   const unmatchedCount = draftMatches.filter((m) => m.matchStatus === 'unmatched').length
 
   const importMutation = useMutation({
@@ -961,8 +982,8 @@ export function QuotationImportWizard({
                 <div className="font-medium text-neutral-950">
                   {lowConfidenceAutoCount} low-confidence match
                   {lowConfidenceAutoCount === 1 ? '' : 'es'} (below{' '}
-                  {Math.round(AUTO_MATCH_THRESHOLD * 100)}%) must be checked one by one: use
-                  Confirm in the row, or pick a different set.
+                  {Math.round(AUTO_MATCH_THRESHOLD * 100)}%) need checking: use Confirm in the
+                  row, pick a different set, or Confirm All Auto.
                 </div>
               )}
             </div>
@@ -986,6 +1007,17 @@ export function QuotationImportWizard({
               >
                 <CheckCheck className="h-3.5 w-3.5" />
                 <span>Confirm Auto Matches ({highConfidenceAutoCount})</span>
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={allAutoWithSetCount === 0}
+                onClick={confirmEveryAuto}
+                title="Confirms every AUTO match, including low-confidence ones"
+              >
+                <CheckCheck className="h-3.5 w-3.5" />
+                <span>Confirm All Auto ({allAutoWithSetCount})</span>
               </Button>
             </div>
           </div>

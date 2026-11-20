@@ -36,6 +36,11 @@ const ProjectDetailPage = lazy(() =>
     default: m.ProjectDetailPage,
   })),
 )
+const ImportQuotationPage = lazy(() =>
+  import('@/features/projects/ImportQuotationPage').then((m) => ({
+    default: m.ImportQuotationPage,
+  })),
+)
 const ProjectHardwarePage = lazy(() =>
   import('@/features/projects/ProjectHardwarePage').then((m) => ({
     default: m.ProjectHardwarePage,
@@ -71,6 +76,7 @@ export default function App() {
               <Route path="/projects" element={<ProjectsPage />} />
               <Route path="/projects/:id" element={<ProjectDetailPage />} />
               <Route path="/projects/:id/hardware" element={<ProjectHardwarePage />} />
+              <Route path="/projects/:id/import" element={<ImportQuotationPage />} />
               <Route path="/parts" element={<PartsLibraryPage />} />
               <Route path="/suppliers" element={<SuppliersPage />} />
               <Route path="/manufacturers" element={<Navigate to="/suppliers" replace />} />
