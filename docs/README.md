@@ -46,10 +46,12 @@ Web application for the Mena Contractors door hardware team. Replaces manual Exc
 │   │   ├── 20261119000018_version_comments.sql                # PM comments on a version (replaces the PM REMARKS column)
 │   │   ├── 20261119000019_line_mhqt_remarks.sql               # project_lines.mhqt_remarks (MHQT REMARKS column)
 │   │   ├── 20261120000020_rename_manufacturers_to_suppliers.sql # manufacturers -> suppliers, parts.supplier_id
-│   │   └── 20261120000021_hardware_quotes_and_sheets.sql      # builder quotes, supplier sheets, sheet comments, award
+│   │   ├── 20261120000021_hardware_quotes_and_sheets.sql      # builder quotes, supplier sheets, sheet comments, award
+│   │   └── 20261120000022_part_folders_and_legend.sql         # part folders, part legend, automatic part swap per sheet
 │   ├── seed/
 │   │   ├── parser.ts                               # Workbook parser, supplier classifier & data issues report
-│   │   └── seed.ts                                 # Idempotent direct-Postgres seed script (--dry-run, --prune)
+│   │   ├── seed.ts                                 # Idempotent direct-Postgres seed script (--dry-run, --prune)
+│   │   └── import-parts.ts                         # Parts library import from a review workbook (dry run / --apply)
 │   └── tests/
 │       ├── rls_policies.test.sql                   # Phase 1 SQL tests (roles, RLS, price history)
 │       ├── phase2_rls.test.sql                     # Phase 2 SQL tests (projects, version locking, approvals, PM remarks)
@@ -58,6 +60,7 @@ Web application for the Mena Contractors door hardware team. Replaces manual Exc
 │       ├── version_comments.test.sql               # PM comment SQL tests
 │       ├── line_remarks.test.sql                   # MHQT remarks SQL tests
 │       ├── quotes_sheets.test.sql                  # builder quotes, supplier sheets & award SQL tests
+│       ├── part_folders.test.sql                   # part folders, legends & automatic part swap SQL tests
 │       └── run-sql-tests.ts                        # Runner for the SQL test suite
 └── web/
     ├── .env.example                                # Public VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY
@@ -113,7 +116,9 @@ Project access is per project: the **project's PM** is `projects.assigned_pm` (s
    - Estimators can bulk-confirm auto-matches scoring ≥ 72%; lower-confidence matches must be confirmed one by one (or changed). They can also pick an alternate Standard Set or define a custom door group.
 3. **Excel-Style Project Grid (`ProjectGridPanel`) and Supplier Sheets (`SheetTabs`, migration 021):**
    - Each quote version has one or more **supplier sheets** (`quote_sheets`, one per supplier). The door groups are shared; each sheet has its own hardware lines (`project_lines.sheet_id`). Tabs under the grid switch sheets; the strip, totals and line edits are per sheet. In a draft the team **adds a sheet** for another supplier (`add_quote_sheet` copies the door groups' lines from a chosen sheet), **renames** it (unique names) or **removes** it (a quote keeps at least one). New revisions copy every sheet.
-   - Part suggestions in the SKU cell come from the sheet's supplier; tick **Parts from other suppliers** to pick another supplier's part (e.g. out of stock). Lines whose library part belongs to another supplier show an **Other supplier** badge in the SUPPLIER column — that's what to swap after adding a sheet. (Automatic swapping to the equivalent part will follow once the per-supplier part lists are loaded.)
+   - **Automatic part swap (migration 022):** a line switches to the sheet supplier's part when that supplier has exactly **one** active part in the same Parts library folder (`supplier_equivalent_part`). This happens when a sheet is added (`add_quote_sheet`) and for new door groups on import / re-import (on every sheet). The line takes that part's SKU, description and unit cost (blank stays blank); a standard-set line becomes "edited". Owner-supplied (MM) parts are never swapped; otherwise the line is copied as it is and flagged.
+   - LEGEND shows the part's legend code (`parts.legend`), else "MM" for owner-supplied parts; the export does the same.
+   - Part suggestions in the SKU cell come from the sheet's supplier, the line's own folder first; tick **Parts from other suppliers** to pick another supplier's part (e.g. out of stock). Lines whose library part belongs to another supplier (except owner-supplied MM parts, which belong on every sheet) show an **Other supplier** badge in the SUPPLIER column — that's what to swap after adding a sheet. (Automatic swapping to the equivalent part will follow once the per-supplier part lists are loaded.)
    - Single connected table with the door details (`ROOM NAME`, `DOOR TAG`, `DOOR SIZE`, `DOOR CLASSIFICATION`, `LEAFS`) followed by the NOVAS Template columns (`LEGEND`, `SUPPLIER`, `PART NUMBER`, `DESCRIPTION`, `QTY`, `COST`, `COST DOOR`, `PRICE`, `PRICE DOOR`, `HW PRICE PER DOOR TYPE`, `OVERALL HW PRICE PER TYPICAL DOOR`, `TOTAL ITEMS PER TYPICAL DOOR`, `MHQT REMARKS`), computed with the same formulas as the export. SKU, description, qty, cost and MHQT remarks are editable (remarks: `project_lines.mhqt_remarks`, migration 019, up to 500 characters, copied into revisions and kept on re-import). The strip above shows markup, overall door qty, total cost, total + markup, deliveries ($1.5 per door) and TOTAL EX. GST, with keyboard navigation (`Arrow` keys, `Enter`/`F2` to edit, `Tab`, `Esc`), SKU autocomplete from the Parts Library, autosave status indicator, and preserved `NULL` unit prices (`No unit price` marker — never defaulted to `0`).
 4. **Versions, Diff & Approval (`ApprovalBar`, `VersionsDiffDialog`):**
    - Submitting a draft first saves any pending grid edits, then locks `door_groups` and `project_lines` via database triggers.
@@ -180,7 +185,7 @@ npm install
   npx supabase db push
   ```
 - **Option B — Using Direct Postgres / SQL Editor:**
-  Run all SQL files in [`supabase/migrations/`](../supabase/migrations/) in chronological order (`20261116000001` through `20261120000021`).
+  Run all SQL files in [`supabase/migrations/`](../supabase/migrations/) in chronological order (`20261116000001` through `20261120000022`).
 
 ### Step 4: Seed the 65 Standard Sets & Parts Library
 
@@ -199,6 +204,22 @@ npm run seed -- --prune
 - Loads all **7 suppliers** (`MM` marked `is_owner_supplied = true`, `NOVAS`, `LOCKWOOD`, `SCOPE`, `GEZE`, `FSH`, `OTHER`), **59 library parts**, and all **65 standard sets** with their part lines.
 - Preserves intentional `NULL` prices (`505BC+SLC` and `L505 BC` have `unit_cost = NULL`, never `0`).
 - Re-running `npm run seed` is completely idempotent (`0` rows duplicated or spuriously updated).
+
+### Parts Library folders & importing supplier part lists
+
+The Parts Library (`/parts`) is organised in **folders** (`part_folders`, migration 022): families of hardware such as "Lever furniture - round rose" or "Seals", each holding parts from every supplier. A folder pane lists All parts, each folder with its count, and Unfiled; admins add, rename and delete folders (deleting a folder leaves its parts unfiled) and set each part's folder and **legend** code in the part form.
+
+Bulk changes come from a review workbook (sheets **Parts**, **Folders**, **Removed**; see `supabase/seed/import-parts.ts` for the columns):
+
+```bash
+cd web
+# Dry run: prints new suppliers / folders / parts, updates, removals and any problems. Writes nothing.
+npm run import:parts -- ../supabase/seed/parts-folders-draft.xlsx
+# Write it, in one transaction (needs migration 022):
+npm run import:parts -- ../supabase/seed/parts-folders-draft.xlsx --apply
+```
+- Parts are matched by part number (SKU). A blank unit cost keeps an existing part's cost; new parts without a cost get no price (never `0`). Notes containing `SKIP` ignore the row.
+- **Removed** parts are deleted after the standard set lines using them are pointed at the "Replace with" part (SKU and description; quantity and price stay). Quote lines keep their text.
 
 ### Step 5: Run the Web App
 

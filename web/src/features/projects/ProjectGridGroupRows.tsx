@@ -36,6 +36,8 @@ export const GRID_COLUMNS: { label: string; align?: 'right' | 'center' }[] = [
 export interface LineSupplier {
   name: string
   ownerSupplied: boolean
+  /** LEGEND column: the part's legend, else "MM" for owner-supplied parts. */
+  legend: string
   /** The part is from another supplier than the sheet's. */
   other: boolean
 }
@@ -195,7 +197,7 @@ export function GroupRowsFragment({
             <td className={CELL} />
             <td className={CELL} />
             <td className={`${CELL} text-xs font-medium text-neutral-700 whitespace-nowrap ${addedBg}`}>
-              {maker?.ownerSupplied ? 'MM' : ''}
+              {maker?.legend ?? ''}
             </td>
             <td className={`${CELL} text-xs text-neutral-700 whitespace-nowrap ${addedBg}`}>
               {maker?.name ?? ''}

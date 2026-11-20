@@ -45,8 +45,21 @@ describe('Shared Zod Schemas & Price Parsing', () => {
       description: 'SLIDING ARM DOOR CLOSER',
       unit_cost: '',
       active: true,
+      folder_id: '',
+      legend: 'C2',
     })
     expect(valid.success).toBe(true)
+
+    const tooLong = partFormSchema.safeParse({
+      sku: 'X',
+      supplier_id: '00000000-0000-0000-0000-000000000001',
+      description: 'X',
+      unit_cost: '',
+      active: true,
+      folder_id: 'not-a-folder',
+      legend: 'X'.repeat(21),
+    })
+    expect(tooLong.success).toBe(false)
   })
 
   it('validates standard set and line forms', () => {

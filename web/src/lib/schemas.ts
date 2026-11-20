@@ -77,6 +77,9 @@ export const partFormSchema = z.object({
     { message: 'Enter a valid non-negative cost or leave blank for no unit price' },
   ),
   active: z.boolean(),
+  /** '' = unfiled. */
+  folder_id: z.union([z.literal(''), z.string().uuid('Select a folder')]),
+  legend: z.string().trim().max(20, 'Legend is too long'),
 })
 
 export type PartFormValues = z.infer<typeof partFormSchema>

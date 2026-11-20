@@ -20,6 +20,15 @@ export interface Supplier {
   updated_at: string
 }
 
+/** A family of hardware in the Parts library, holding parts from every supplier (migration 022). */
+export interface PartFolder {
+  id: string
+  name: string
+  position: number
+  created_at: string
+  updated_at: string
+}
+
 export interface Part {
   id: string
   sku: string
@@ -27,6 +36,10 @@ export interface Part {
   description: string
   unit_cost: number | null
   active: boolean
+  /** Folder (migration 022); null = unfiled. */
+  folder_id?: string | null
+  /** Legend code from the quotes, e.g. "F7" (migration 022); '' when none. */
+  legend?: string
   created_at: string
   updated_at: string
   suppliers?: Pick<Supplier, 'id' | 'name' | 'is_owner_supplied'> | null

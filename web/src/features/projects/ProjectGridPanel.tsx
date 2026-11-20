@@ -126,7 +126,7 @@ export function ProjectGridPanel({
         supabase
           .from('parts')
           .select(
-            'id, sku, supplier_id, description, unit_cost, active, created_at, updated_at, suppliers(id, name, is_owner_supplied)',
+            'id, sku, supplier_id, description, unit_cost, active, folder_id, legend, created_at, updated_at, suppliers(id, name, is_owner_supplied)',
           )
           .eq('active', true)
           .order('sku', { ascending: true })
@@ -562,9 +562,24 @@ export function ProjectGridPanel({
       ? {
           name: m.name,
           ownerSupplied: m.is_owner_supplied,
-          other: !!sheetSupplierId && part.supplier_id !== sheetSupplierId,
+          legend: part.legend || (m.is_owner_supplied ? 'MM' : ''),
+          // Owner-supplied (MM) parts belong on every supplier's sheet: never flagged.
+          other: !!sheetSupplierId && part.supplier_id !== sheetSupplierId && !m.is_owner_supplied,
         }
       : null
+  }
+
+  // Part suggestions for a line: its own folder first (the sheet supplier's parts
+  // before others'), then the rest of the suggested parts.
+  const suggestionsFor = (line: ProjectLine): Part[] => {
+    const current =
+      (line.part_id ? partById.get(line.part_id) : undefined) ??
+      partBySku.get(line.sku.trim().toUpperCase())
+    const folderId = current?.folder_id
+    if (!folderId) return suggestedParts
+    const rank = (p: Part) =>
+      p.folder_id === folderId ? (p.supplier_id === sheetSupplierId ? 0 : 1) : 2
+    return [...suggestedParts].sort((a, b) => rank(a) - rank(b))
   }
 
   const renderEditableCell = (
@@ -584,7 +599,7 @@ export function ProjectGridPanel({
           key={`${line.id}:${col}`}
           initialValue={editingCell.initial}
           isSku={col === 0}
-          parts={suggestedParts}
+          parts={col === 0 ? suggestionsFor(line) : suggestedParts}
           showSupplier={allSuppliers}
           alignRight={alignRight}
           onCommit={(value, move) => {

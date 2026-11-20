@@ -1239,7 +1239,7 @@ test('Hardware: the PM comments in the drawer (no PM REMARKS column)', async ({ 
   await expect(page.getByText('LOBBY')).toBeVisible()
   await expect(page.getByRole('columnheader', { name: 'PM REMARKS' })).toHaveCount(0)
 
-  await page.getByRole('button', { name: 'PM Comments (0)' }).click()
+  await page.getByRole('button', { name: /^(PM )?Comments \(0\)$/ }).click()
   const drawer = page.getByTestId('comments-drawer')
   await expect(drawer.getByText('No comments yet. Add the first one below.')).toBeVisible()
 
@@ -1254,7 +1254,7 @@ test('Hardware: the PM comments in the drawer (no PM REMARKS column)', async ({ 
     version_id: VERSION_ID, door_group_id: 'group-c-1', author_id: PM_ID, body: 'Use satin hinges here',
   })
   await expect(drawer.getByTestId('comment')).toHaveCount(1)
-  await expect(page.getByRole('button', { name: 'PM Comments (1)' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^(PM )?Comments \(1\)$/ })).toBeVisible()
   // The door group row shows the count.
   await expect(page.getByRole('button', { name: '1 PM comment on LOBBY' })).toBeVisible()
 })
@@ -1334,9 +1334,10 @@ test('Supplier sheets: add a sheet, flag other-supplier parts, rename, export bo
   await expect(page.getByTestId('sheet-tab')).toHaveText(['MM', 'NOVAS'])
   await expect(page.getByRole('tab', { name: 'NOVAS' })).toHaveAttribute('aria-selected', 'true')
   expect(state.sheets.filter((s) => s.version_id === VERSION_ID)).toHaveLength(2)
-  // The copied MM hinge is flagged on the NOVAS sheet.
+  // The copied MM hinge is owner-supplied: it belongs on every sheet and is never flagged.
   const hingeRow = page.getByRole('row').filter({ hasText: 'MMHINGE' })
-  await expect(hingeRow.getByTestId('other-supplier-badge')).toBeVisible()
+  await expect(hingeRow).toBeVisible()
+  await expect(hingeRow.getByTestId('other-supplier-badge')).toHaveCount(0)
 
   // Part suggestions: NOVAS parts only, unless other suppliers are allowed.
   await hingeRow.locator('td').nth(7).locator('div[tabindex]').dblclick()
@@ -1395,7 +1396,7 @@ test('PM comments on one supplier sheet', async ({ page }) => {
   await page.goto(`/projects/${PROJECT_ID}/hardware`)
 
   await page.getByRole('tab', { name: 'NOVAS' }).click()
-  await page.getByRole('button', { name: 'PM Comments (0)' }).click()
+  await page.getByRole('button', { name: /^(PM )?Comments \(0\)$/ }).click()
   const drawer = page.getByTestId('comments-drawer')
   // New comments point at the sheet open in the grid.
   await expect(drawer.getByLabel('for', { exact: true })).toHaveValue('sheet-nv')

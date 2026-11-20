@@ -73,6 +73,22 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
     })
   })
 
+  const LOCKS_FOLDER = '66666666-6666-6666-6666-666666666666'
+  const folders: Array<Record<string, unknown>> = [
+    { id: LOCKS_FOLDER, name: 'Locks & latches', position: 1, created_at: '2026-11-16T00:00:00Z', updated_at: '2026-11-16T00:00:00Z' },
+  ]
+  const createdFolders: Array<Record<string, unknown>> = []
+  await page.route('**/rest/v1/part_folders**', async (route) => {
+    if (route.request().method() === 'POST') {
+      const payload = route.request().postDataJSON() as Record<string, unknown>
+      createdFolders.push(payload)
+      folders.push({ id: '77777777-7777-7777-7777-777777777777', created_at: '2026-11-16T00:00:00Z', updated_at: '2026-11-16T00:00:00Z', ...payload })
+      await route.fulfill({ status: 201, contentType: 'application/json', body: '[]' })
+      return
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(folders) })
+  })
+
   await page.route('**/rest/v1/parts**', async (route) => {
     await route.fulfill({
       status: 200,
@@ -85,6 +101,8 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
           description: 'NOVAS 6000 SERIES VESTIBULE LOCK 60MM BACKSET SSS',
           unit_cost: 54,
           active: true,
+          folder_id: LOCKS_FOLDER,
+          legend: 'L2',
           created_at: '2026-11-16T00:00:00Z',
           updated_at: '2026-11-16T00:00:00Z',
           suppliers: {
@@ -100,6 +118,8 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
           description: 'SLIDING ARM DOOR CLOSER',
           unit_cost: null,
           active: true,
+          folder_id: null,
+          legend: '',
           created_at: '2026-11-16T00:00:00Z',
           updated_at: '2026-11-16T00:00:00Z',
           suppliers: {
@@ -128,4 +148,24 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
   await expect(page.getByText('6125SSS')).toBeVisible()
   await expect(page.getByText('505BC+SLC')).toBeVisible()
   await expect(page.getByTestId('no-unit-price-marker')).toHaveText('No unit price')
+
+  // 4. Folders: All parts, each folder and Unfiled, with counts.
+  const pane = page.getByRole('navigation', { name: 'Part folders' })
+  await expect(pane.getByTestId('folder-item')).toHaveText(['All parts2', 'Locks & latches1', 'Unfiled1'])
+  await pane.getByRole('button', { name: /Locks & latches/ }).click()
+  await expect(page.getByRole('heading', { name: 'Locks & latches' })).toBeVisible()
+  await expect(page.getByText('6125SSS')).toBeVisible()
+  await expect(page.getByText('505BC+SLC')).toHaveCount(0)
+  await expect(page.getByRole('row').filter({ hasText: '6125SSS' })).toContainText('L2')
+  await pane.getByRole('button', { name: /Unfiled/ }).click()
+  await expect(page.getByText('505BC+SLC')).toBeVisible()
+  await expect(page.getByText('6125SSS')).toHaveCount(0)
+
+  // 5. Admins add folders.
+  await pane.getByRole('button', { name: 'New folder' }).click()
+  await page.getByLabel('Folder name').fill('Hinges')
+  await page.getByRole('button', { name: 'Save' }).click()
+  await expect.poll(() => createdFolders.length).toBe(1)
+  expect(createdFolders[0]).toMatchObject({ name: 'Hinges', position: 2 })
+  await expect(pane.getByRole('button', { name: /Hinges/ })).toBeVisible()
 })

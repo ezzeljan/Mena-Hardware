@@ -75,7 +75,7 @@ describe('buildProjectExportWorkbook', () => {
 
     const parts = [
       { id: 'p-hinge', sku: 'MMHINGE', suppliers: { id: 'm1', name: 'MM', is_owner_supplied: true } },
-      { id: 'p-seal', sku: 'CUSTOMSEAL', suppliers: { id: 'm2', name: 'NOVAS', is_owner_supplied: false } },
+      { id: 'p-seal', sku: 'CUSTOMSEAL', legend: 'BWS', suppliers: { id: 'm2', name: 'NOVAS', is_owner_supplied: false } },
     ]
 
     const buf = await buildProjectExportWorkbook({
@@ -157,8 +157,9 @@ describe('buildProjectExportWorkbook', () => {
     expect(result('L7')).toBe(6)
     expect(ws!.getCell('M7').value).toBe('Supply only')
 
-    // Line 2 (added, blank price) row 8: price cells stay empty and are flagged
-    expect(ws!.getCell('A8').value).toBeNull()
+    // Line 2 (added, blank price) row 8: price cells stay empty and are flagged;
+    // LEGEND is the part's legend code.
+    expect(ws!.getCell('A8').value).toBe('BWS')
     expect(ws!.getCell('B8').value).toBe('NOVAS')
     expect(ws!.getCell('C8').value).toBe('CUSTOMSEAL')
     expect(ws!.getCell('F8').value).toBeNull()

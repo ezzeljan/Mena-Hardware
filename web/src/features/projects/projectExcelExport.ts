@@ -37,7 +37,7 @@ export interface ProjectExportInput {
   /** Builder of the quote, added to the file name. */
   quoteName?: string
   /** Library parts, for each line's supplier (matched by part id, else SKU). */
-  parts?: Pick<Part, 'id' | 'sku' | 'suppliers'>[]
+  parts?: Pick<Part, 'id' | 'sku' | 'suppliers' | 'legend'>[]
 }
 
 // Number formats and colours copied from the Mena "NOVAS Template" workbook.
@@ -282,8 +282,9 @@ export async function buildProjectExportWorkbook({
         const hasPrice = line.unit_price !== null
         const cost = hasPrice ? Number(line.unit_price) : null
 
-        // LEGEND: "MM" for owner-supplied (Mena) items, as in the template.
-        if (ownerSupplied) row.getCell(1).value = 'MM'
+        // LEGEND: the part's legend code, else "MM" for owner-supplied (Mena) items.
+        const legend = part?.legend || (ownerSupplied ? 'MM' : '')
+        if (legend) row.getCell(1).value = legend
         if (supplier) row.getCell(2).value = supplier
         row.getCell(3).value = line.sku
         row.getCell(4).value = line.description
