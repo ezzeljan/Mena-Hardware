@@ -13,8 +13,9 @@
  *            Unit cost: blank keeps an existing part's cost (a new part gets no price, never 0).
  *   Removed  Part number | ... | Replace with (part number)
  *            Standard set lines using the part are pointed at the replacement
- *            (SKU and description; their quantity and price stay), then the
- *            part is deleted. Quote lines keep their text.
+ *            (SKU and description; their quantity and price stay). The part
+ *            is deleted, or deactivated and unfiled when quote lines still
+ *            link to it (locked versions can't change). Quote lines keep their text.
  *
  * Suppliers and folders that don't exist yet are created. Parts in the
  * library that the workbook doesn't mention are left as they are (listed).
@@ -205,6 +206,13 @@ async function main(): Promise<void> {
         ? 'select id, sku, description, unit_cost, active, legend, supplier_id, folder_id from public.parts'
         : "select id, sku, description, unit_cost, active, '' as legend, supplier_id, null::uuid as folder_id from public.parts",
     )).rows
+    // Parts linked from quote lines can't be deleted (locked versions keep
+    // their lines): those are deactivated and unfiled instead.
+    const quoteUse = new Map(
+      (await client.query<{ part_id: string; n: number }>(
+        'select part_id, count(*)::int n from public.project_lines where part_id is not null group by 1',
+      )).rows.map((r) => [r.part_id, r.n]),
+    )
     const setUse = new Map(
       (await client.query<{ k: string; n: number }>(
         'select upper(btrim(sku)) k, count(*)::int n from public.standard_set_lines group by 1',
@@ -242,7 +250,9 @@ async function main(): Promise<void> {
     }
 
     const workbookSkus = new Set(wbData.parts.map((p) => key(p.sku)))
-    const removals: Array<{ id: string; sku: string; replace: string; replaceDescription: string; setLines: number }> = []
+    const removals: Array<{
+      id: string; sku: string; replace: string; replaceDescription: string; setLines: number; quoteLines: number
+    }> = []
     const reactivateTargets = new Set<string>()
     for (const r of wbData.removed) {
       const lib = partBySku.get(key(r.sku))
@@ -260,7 +270,10 @@ async function main(): Promise<void> {
         if (inBook && !inBook.active) reactivateTargets.add(inBook.sku)
         else if (!inBook && inLib && !inLib.active) reactivateTargets.add(inLib.sku)
       }
-      removals.push({ id: lib.id, sku: lib.sku, replace: r.replaceWith, replaceDescription, setLines: setUse.get(key(lib.sku)) ?? 0 })
+      removals.push({
+        id: lib.id, sku: lib.sku, replace: r.replaceWith, replaceDescription,
+        setLines: setUse.get(key(lib.sku)) ?? 0, quoteLines: quoteUse.get(lib.id) ?? 0,
+      })
     }
     const removedSkus = new Set(removals.map((r) => key(r.sku)))
     const untouched = libParts.filter((p) => !workbookSkus.has(key(p.sku)) && !removedSkus.has(key(p.sku)))
@@ -277,8 +290,13 @@ async function main(): Promise<void> {
     for (const u of updates) line(`  ~ ${u.row.sku.padEnd(18)} ${u.changes.join('; ')}`)
     const reactivateExtra = [...reactivateTargets].filter((s) => !updates.some((u) => key(u.row.sku) === key(s) && u.changes.includes('reactivate')))
     if (reactivateExtra.length) line(`\nReactivated because a removed part is replaced by them: ${reactivateExtra.join(', ')}`)
-    line(`\nRemoved parts (${removals.length}) - deleted; their standard set lines are pointed at the replacement:`)
-    for (const r of removals) line(`  - ${r.sku.padEnd(18)} ${String(r.setLines).padStart(3)} set lines -> ${r.replace || '(no replacement: set lines keep their text)'}`)
+    const toDeactivate = removals.filter((r) => r.quoteLines > 0)
+    line(`\nRemoved parts (${removals.length}): their standard set lines are pointed at the replacement.`)
+    line(`  Deleted: ${removals.length - toDeactivate.length}. Deactivated and unfiled (still on ${toDeactivate.reduce((s, r) => s + r.quoteLines, 0)} quote lines): ${toDeactivate.length}.`)
+    for (const r of removals) {
+      const target = (r.replace || '(no replacement: set lines keep their text)').padEnd(16)
+      line(`  - ${r.sku.padEnd(18)} ${String(r.setLines).padStart(3)} set lines -> ${target} ${r.quoteLines ? `deactivate (${r.quoteLines} quote lines)` : 'delete'}`)
+    }
     line(`  Standard set lines repointed: ${removals.filter((r) => r.replace).reduce((s, r) => s + r.setLines, 0)}; left as text: ${removals.filter((r) => !r.replace).reduce((s, r) => s + r.setLines, 0)}`)
     if (wbData.skipped.length) line(`\nSkipped rows (SKIP): ${wbData.skipped.join(', ')}`)
     line(`\nLibrary parts not in the workbook, left unchanged (${untouched.length}): ${untouched.map((p) => p.sku).join(', ') || '-'}`)
@@ -342,7 +360,11 @@ async function main(): Promise<void> {
              where upper(btrim(sku)) = $1`,
             [key(r.sku), r.replace, r.replaceDescription])
         }
-        await client.query('delete from public.parts where id = $1', [r.id])
+        if (r.quoteLines > 0) {
+          await client.query('update public.parts set active = false, folder_id = null where id = $1', [r.id])
+        } else {
+          await client.query('delete from public.parts where id = $1', [r.id])
+        }
       }
       await client.query('commit')
       line('\nApplied and committed.')

@@ -219,7 +219,7 @@ npm run import:parts -- ../supabase/seed/parts-folders-draft.xlsx
 npm run import:parts -- ../supabase/seed/parts-folders-draft.xlsx --apply
 ```
 - Parts are matched by part number (SKU). A blank unit cost keeps an existing part's cost; new parts without a cost get no price (never `0`). Notes containing `SKIP` ignore the row.
-- **Removed** parts are deleted after the standard set lines using them are pointed at the "Replace with" part (SKU and description; quantity and price stay). Quote lines keep their text.
+- **Removed** parts: the standard set lines using them are pointed at the "Replace with" part (SKU and description; quantity and price stay). The part is then deleted, or deactivated and unfiled when quote lines still link to it (submitted / approved versions are locked). Quote lines keep their text.
 
 ### Step 5: Run the Web App
 
