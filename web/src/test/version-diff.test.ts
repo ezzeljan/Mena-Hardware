@@ -73,4 +73,20 @@ describe('computeVersionDiff', () => {
     expect(kinds).toContain('NEWSEAL:added')
     expect(kinds).toContain('OLDSTOP:removed')
   })
+
+  it('pairs a group saved before hardware was part of the key with its new group', () => {
+    const OLD = 'D10 | BATHROOM | NON RATED | SINGLE | 2040x920'
+    const base = [makeGroup({ id: 'g-old', version_id: 'v1', group_key: OLD })]
+    const target = [makeGroup({ id: 'g-new', version_id: 'v2', group_key: `${OLD} | Latch · Stop` })]
+    const diff = computeVersionDiff(
+      base,
+      [makeLine({ id: 'a', group_id: 'g-old' })],
+      target,
+      [makeLine({ id: 'b', group_id: 'g-new' })],
+    )
+    expect(diff.groups).toHaveLength(1)
+    expect(diff.groups[0].beforeDoorQty).toBe(4)
+    expect(diff.groups[0].afterDoorQty).toBe(4)
+    expect(diff.summary).toEqual({ added: 0, removed: 0, changed: 0, unchanged: 1 })
+  })
 })

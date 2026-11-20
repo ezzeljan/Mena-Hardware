@@ -906,7 +906,7 @@ test('Admin: create project -> import quotation -> submit -> approve -> export E
   expect(hwSheet!.getCell('B4').value).toEqual(new Date(Date.UTC(now.getFullYear(), now.getMonth(), 15)))
   expect((hwSheet!.getCell('E4').value as { result: number }).result).toBe(5) // OVERALL DOOR QTY: 2 + 3
   expect(hwSheet!.getCell('M5').value).toBe('MHQT  REMARKS')
-  expect(hwSheet!.getCell('A6').value).toBe('FIRE EGRESS - BASEMENT')
+  expect(hwSheet!.getCell('A6').value).toBe('Fire Egress - Basement') // as written in the quotation
   expect(hwSheet!.getCell('D6').value).toBe('DOOR QTY:')
   // Line 1 of group 1 is the owner-supplied MM hinge
   expect(hwSheet!.getCell('A7').value).toBe('MM')
@@ -1472,9 +1472,9 @@ test('Awarded project: the other quotes are read-only and no quote can be added'
 })
 
 test('Import page: Confirm All Auto confirms low-confidence matches too (after asking)', async ({ page }) => {
-  // A plant room door only loosely matches the fire egress set (low confidence).
+  // A fire pump plant room only partly matches the fire egress set (low confidence).
   const PLANT_ROW = [
-    'Level 02', 'DR-003', 'A02', 'Plant Room', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2040, 820, '-', 1, '', '', 1,
+    'Level 02', 'DR-003', 'A02', 'Plant Room - Fire Pump', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2040, 820, '-', 1, '', '', 1,
   ]
   await mockSupabase(page, 'estimator', {
     project: existingProject(PM_ID),

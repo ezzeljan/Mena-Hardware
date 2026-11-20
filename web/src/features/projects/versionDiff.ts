@@ -1,4 +1,5 @@
 import type { DoorGroup, ProjectLine } from '@/types/database'
+import { makeGroupFinder } from '@/features/projects/groupKey'
 
 export type LineDiffKind = 'added' | 'removed' | 'changed' | 'unchanged'
 
@@ -39,8 +40,9 @@ export function computeVersionDiff(
   targetGroups: DoorGroup[],
   targetLines: ProjectLine[],
 ): VersionDiffResult {
-  const baseByKey = new Map(baseGroups.map((g) => [g.group_key, g]))
-  const targetByKey = new Map(targetGroups.map((g) => [g.group_key, g]))
+  // Pair each target group with its base group: the same key, or a base group
+  // saved before hardware was part of the key (groupKey.ts).
+  const findBase = makeGroupFinder(baseGroups)
 
   const baseLinesByGroup = new Map<string, ProjectLine[]>()
   for (const l of baseLines) {
@@ -56,10 +58,16 @@ export function computeVersionDiff(
     targetLinesByGroup.set(l.group_id, arr)
   }
 
-  const allKeys = new Set<string>([
-    ...targetGroups.map((g) => g.group_key),
-    ...baseGroups.map((g) => g.group_key),
-  ])
+  const pairs: Array<{ key: string; bg: DoorGroup | undefined; tg: DoorGroup | undefined }> = []
+  const pairedBase = new Set<string>()
+  for (const tg of targetGroups) {
+    const bg = findBase(tg.group_key)
+    if (bg) pairedBase.add(bg.id)
+    pairs.push({ key: tg.group_key, bg, tg })
+  }
+  for (const bg of baseGroups) {
+    if (!pairedBase.has(bg.id)) pairs.push({ key: bg.group_key, bg, tg: undefined })
+  }
 
   const groupDiffs: GroupDiffItem[] = []
   let added = 0
@@ -67,15 +75,13 @@ export function computeVersionDiff(
   let changed = 0
   let unchanged = 0
 
-  for (const key of allKeys) {
-    const bg = baseByKey.get(key)
-    const tg = targetByKey.get(key)
+  for (const { key, bg, tg } of pairs) {
     const ref = tg ?? bg!
 
-    const bLines = [...(bg ? baseLinesByGroup.get(bg.id) ?? [] : [])].sort(
+    const bLines = [...(bg ? (baseLinesByGroup.get(bg.id) ?? []) : [])].sort(
       (a, b) => a.position - b.position,
     )
-    const tLines = [...(tg ? targetLinesByGroup.get(tg.id) ?? [] : [])].sort(
+    const tLines = [...(tg ? (targetLinesByGroup.get(tg.id) ?? []) : [])].sort(
       (a, b) => a.position - b.position,
     )
 
@@ -85,9 +91,7 @@ export function computeVersionDiff(
 
     for (const tl of tLines) {
       const matchIdx = bLines.findIndex(
-        (bl, idx) =>
-          !bUsed.has(idx) &&
-          bl.sku.trim().toUpperCase() === tl.sku.trim().toUpperCase(),
+        (bl, idx) => !bUsed.has(idx) && bl.sku.trim().toUpperCase() === tl.sku.trim().toUpperCase(),
       )
 
       if (matchIdx === -1) {

@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from 'react'
 import { ArrowDown, ArrowUp, MessageSquare, Plus, Trash2 } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import type { DoorGroup, ProjectLine } from '@/types/database'
+import { groupKeyHardware } from '@/features/projects/groupKey'
 import { Button } from '@/components/ui/button'
 
 /** Editable grid columns: 0 sku, 1 description, 2 qty_per_door, 3 unit cost, 4 MHQT remarks. */
@@ -139,7 +140,13 @@ export function GroupRowsFragment({
         <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
           {group.leaf || ''}
         </td>
-        <td className="border border-neutral-300 px-2 py-1" />
+        {/* The hardware every door in the group has (from the quotation's hardware columns). */}
+        <td
+          className="border border-neutral-300 px-2 py-1 text-[11px] font-normal text-neutral-600"
+          title={groupKeyHardware(group.group_key) ? 'Hardware from the quotation' : undefined}
+        >
+          {groupKeyHardware(group.group_key)}
+        </td>
         <td className="border border-neutral-300 px-2 py-1" />
         <td className="border border-neutral-300 px-2 py-1" />
         <td className="border border-neutral-300 px-2 py-1" />
