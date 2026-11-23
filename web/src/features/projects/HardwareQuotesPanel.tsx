@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, FileSpreadsheet, Lock, Pencil, Plus, Trophy } from 'lucide-react'
+import { ArrowRight, FileSpreadsheet, Lock, Pencil, Plus, Trash2, Trophy } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import type { QuoteSheet, VersionStatus } from '@/types/database'
 import type { QuoteDetail } from '@/features/projects/useProjectDetail'
@@ -52,6 +52,9 @@ export function HardwareQuotesPanel({
   const [renaming, setRenaming] = useState<QuoteDetail | null>(null)
   const [newName, setNewName] = useState('')
   const [renameError, setRenameError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<QuoteDetail | null>(null)
+  const [confirmName, setConfirmName] = useState('')
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const latestIds = quotes.flatMap((q) => (q.latestVersion ? [q.latestVersion.id] : []))
   const sheetsQuery = useQuery({
@@ -89,6 +92,21 @@ export function HardwareQuotesPanel({
       await queryClient.invalidateQueries({ queryKey: ['project', projectId] })
     },
     onError: (err: Error) => setRenameError(err.message),
+  })
+
+  // Delete a builder's quote with everything in it (delete_quote, migration 023).
+  const deleteMutation = useMutation({
+    mutationFn: async (quoteId: string) => {
+      const { error } = await supabase.rpc('delete_quote', { p_quote_id: quoteId })
+      if (error) throw new Error(error.message)
+    },
+    onSuccess: async () => {
+      setDeleting(null)
+      await queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+      // ['projects'] also covers the dashboard's work list (['projects', 'my-work']).
+      await queryClient.invalidateQueries({ queryKey: ['projects'] })
+    },
+    onError: (err: Error) => setDeleteError(err.message),
   })
 
   const sheetsByVersion = new Map<string, string[]>()
@@ -147,6 +165,27 @@ export function HardwareQuotesPanel({
                         }}
                       >
                         <Pencil className="h-3 w-3" />
+                      </button>
+                    )}
+                    {/* Estimators (and admins) delete a quote until the project is awarded. */}
+                    {canEditContent && !q.locked && !q.isWinner && (
+                      <button
+                        type="button"
+                        aria-label={`Delete the quote for ${q.builder_name}`}
+                        title={
+                          q.versions.some((ver) => ver.status === 'submitted')
+                            ? 'Waiting for PM review — delete it after the PM approves or requests changes'
+                            : 'Delete this quote'
+                        }
+                        disabled={q.versions.some((ver) => ver.status === 'submitted')}
+                        className="text-neutral-400 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-neutral-400"
+                        onClick={() => {
+                          setDeleting(q)
+                          setConfirmName('')
+                          setDeleteError(null)
+                        }}
+                      >
+                        <Trash2 className="h-3 w-3" />
                       </button>
                     )}
                     {q.isWinner && (
@@ -208,6 +247,74 @@ export function HardwareQuotesPanel({
           })}
         </ul>
       )}
+
+      <Dialog
+        open={deleting !== null}
+        onOpenChange={(o) => !o && !deleteMutation.isPending && setDeleting(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Quote</DialogTitle>
+            <DialogDescription>
+              Deletes {deleting?.builder_name}&apos;s quote with all its versions (
+              {deleting?.versions.length ?? 0}), supplier sheets, hardware lines and PM comments.
+              This can&apos;t be undone.
+            </DialogDescription>
+          </DialogHeader>
+          {deleteError && (
+            <div
+              role="alert"
+              className="border border-neutral-950 bg-neutral-100 p-3 text-xs text-neutral-950"
+            >
+              {deleteError}
+            </div>
+          )}
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (!deleting) return
+              if (confirmName.trim().toLowerCase() !== deleting.builder_name.trim().toLowerCase()) {
+                setDeleteError(`Type "${deleting.builder_name}" to confirm.`)
+                return
+              }
+              deleteMutation.mutate(deleting.id)
+            }}
+          >
+            <div className="space-y-1.5">
+              <Label htmlFor="delete-quote-confirm">
+                Type <span className="font-semibold">{deleting?.builder_name}</span> to confirm
+              </Label>
+              <Input
+                id="delete-quote-confirm"
+                autoComplete="off"
+                value={confirmName}
+                onChange={(e) => setConfirmName(e.target.value)}
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={deleteMutation.isPending}
+                onClick={() => setDeleting(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={
+                  deleteMutation.isPending ||
+                  confirmName.trim().toLowerCase() !==
+                    (deleting?.builder_name ?? '').trim().toLowerCase()
+                }
+              >
+                {deleteMutation.isPending ? 'Deleting...' : 'Delete Quote'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={renaming !== null} onOpenChange={(o) => !o && setRenaming(null)}>
         <DialogContent>

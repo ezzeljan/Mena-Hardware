@@ -171,6 +171,7 @@ interface MockState {
   lastProjectUpdate?: Row
   lastReimport?: { p_quote_id: string; p_groups: Array<Row & { lines: Row[] }> }
   lastImport?: Row
+  lastDeletedQuote?: string
 }
 
 /** The sheet of a version for its first supplier (seeded versions get one). */
@@ -605,6 +606,19 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
       .map((l, i) => ({ ...l, id: `${id}-line-${i + 1}`, sheet_id: id }))
     state.lines.push(...copies)
     return json(route, id)
+  })
+
+  await page.route('**/rest/v1/rpc/delete_quote', async (route) => {
+    const { p_quote_id } = route.request().postDataJSON() as { p_quote_id: string }
+    const versionIds = new Set(state.versions.filter((v) => v.quote_id === p_quote_id).map((v) => v.id))
+    const groupIds = new Set(state.doorGroups.filter((g) => versionIds.has(g.version_id)).map((g) => g.id))
+    state.quotes = state.quotes.filter((q) => q.id !== p_quote_id)
+    state.versions = state.versions.filter((v) => !versionIds.has(v.id))
+    state.sheets = state.sheets.filter((sh) => !versionIds.has(sh.version_id))
+    state.doorGroups = state.doorGroups.filter((g) => !groupIds.has(g.id))
+    state.lines = state.lines.filter((l) => !groupIds.has(l.group_id))
+    state.lastDeletedQuote = p_quote_id
+    return json(route, null)
   })
 
   await page.route('**/rest/v1/rpc/transition_version', async (route) => {
@@ -1515,4 +1529,47 @@ test('Import page: Confirm All Auto confirms low-confidence matches too (after a
   // Cancel goes back to the project overview.
   await page.getByRole('button', { name: 'Cancel' }).click()
   await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}$`))
+})
+
+test('Estimator deletes a builder quote (not while it waits for PM review)', async ({ page }) => {
+  const state = await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+    quotes: [
+      { id: QUOTE_ID, project_id: PROJECT_ID, builder_name: BUILDER, created_by: PM_ID, created_at: TS, updated_at: TS },
+      { id: QUOTE2_ID, project_id: PROJECT_ID, builder_name: 'Bolt Construct', created_by: PM_ID, created_at: '2026-11-18T01:00:00Z', updated_at: TS },
+    ],
+    versions: [
+      {
+        id: VERSION_ID, project_id: PROJECT_ID, quote_id: QUOTE_ID, version_no: 1, status: 'submitted',
+        upload_id: UPLOAD_ID, markup_pct: 12, created_by: ESTIMATOR_ID,
+        submitted_at: TS, created_at: TS, updated_at: TS,
+      },
+      {
+        id: VERSION2_ID, project_id: PROJECT_ID, quote_id: QUOTE2_ID, version_no: 1, status: 'approved',
+        upload_id: UPLOAD_ID, markup_pct: 12, created_by: ESTIMATOR_ID,
+        submitted_at: TS, created_at: TS, updated_at: TS,
+      },
+    ],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}`)
+
+  const quotes = page.getByTestId('hardware-quotes')
+  await expect(quotes.getByTestId('hardware-quote-row')).toHaveCount(2)
+  // Waiting for PM review: can't be deleted yet.
+  await expect(quotes.getByRole('button', { name: `Delete the quote for ${BUILDER}` })).toBeDisabled()
+
+  await quotes.getByRole('button', { name: 'Delete the quote for Bolt Construct' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Delete Quote' })
+  await expect(dialog).toContainText("Deletes Bolt Construct's quote with all its versions (1)")
+  const confirm = dialog.getByRole('button', { name: 'Delete Quote' })
+  await expect(confirm).toBeDisabled()
+  await dialog.getByLabel(/to confirm/).fill('bolt construct')
+  await confirm.click()
+
+  await expect.poll(() => state.lastDeletedQuote).toBe(QUOTE2_ID)
+  await expect(dialog).toHaveCount(0)
+  await expect(quotes.getByTestId('hardware-quote-row')).toHaveCount(1)
+  await expect(quotes).not.toContainText('Bolt Construct')
 })

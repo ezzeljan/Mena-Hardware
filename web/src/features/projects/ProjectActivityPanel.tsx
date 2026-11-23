@@ -17,6 +17,7 @@ import {
   UserMinus,
   UserPlus,
   type LucideIcon,
+  Trash2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import type { ActivityCategory, ProjectActivity } from '@/types/database'
@@ -52,6 +53,7 @@ const ACTION_ICON: Record<string, { icon: LucideIcon; tone: string }> = {
   estimator_removed: { icon: UserMinus, tone: 'bg-neutral-500 text-white' },
   quotation_imported: { icon: FilePlus2, tone: 'bg-sky-600 text-white' },
   quotation_reimported: { icon: FileSpreadsheet, tone: 'bg-sky-600 text-white' },
+  quote_deleted: { icon: Trash2, tone: 'bg-red-600 text-white' },
   revision_started: { icon: GitBranch, tone: 'bg-neutral-700 text-white' },
   version_submitted: { icon: Send, tone: 'bg-blue-600 text-white' },
   version_approved: { icon: Check, tone: 'bg-emerald-600 text-white' },
