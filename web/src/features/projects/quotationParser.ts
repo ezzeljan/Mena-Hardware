@@ -3,6 +3,14 @@ import type ExcelJS from 'exceljs';
 import { loadExcelJS } from '../../lib/loadExcelJS';
 import { commentItems } from './doorFlags';
 import { makeGroupKey, typicalDoorOf } from './groupKey';
+import {
+  ACTIVITY_COLUMNS,
+  activitiesToken,
+  activityQuantities,
+  activityRates,
+  type ActivityKey,
+  type DoorActivities,
+} from './doorActivities';
 
 export interface ParsedQuotationDoor {
   door_ref: string;
@@ -15,8 +23,15 @@ export interface ParsedQuotationDoor {
   source_row: number;
   /** The door's hardware columns, e.g. "Closer · Lock · ES: RS" ('' when none). */
   hardware: string;
+  /**
+   * Extra hinges per door from the EXTRA HINGE (FR) column (9 = one hinge);
+   * 0 when blank, null when the sheet has no such column.
+   */
+  extra_hinges: number | null;
   /** Door schedule and Mena comments, joined with " | " ('' when none). */
   comments: string;
+  /** Parts its PREPARATION / INSTALLATION costs call for, with quantities (see doorActivities.ts). */
+  activities: DoorActivities;
 }
 
 export interface ParsedDoorGroupPreview {
@@ -33,6 +48,10 @@ export interface ParsedDoorGroupPreview {
   hardware: string;
   /** The room with the most doors in the group, used for matching a merged group. */
   match_room: string;
+  /** Extra hinges per door (the same for every door in the group; see ParsedQuotationDoor). */
+  extra_hinges: number | null;
+  /** Prep / install activities of every door in the group (part of the hardware, so the same). */
+  activities: DoorActivities;
 }
 
 export interface ParseIssue {
@@ -72,6 +91,8 @@ export interface QuotationParseResult {
   sheetQtyTotalRow: number | null;
   /** Excluded rows the estimator chose to include (see applyRowInclusions). */
   includedRows: number[];
+  /** Prep / install activity columns the sheet has (an activity is only flagged as missing when its column is there). */
+  activityColumns: ActivityKey[];
 }
 
 interface ColumnMap {
@@ -89,7 +110,10 @@ interface ColumnMap {
   leafs?: number;
   scheduleComments?: number;
   menaComments?: number;
+  extraHinge?: number;
   qty: number;
+  /** PREPARATION / INSTALLATION COST activity columns: [activity, column]. */
+  activities: Array<[ActivityKey, number]>;
   /** Hardware columns found, in sheet order: [label, column]. */
   hardware: Array<[string, number]>;
 }
@@ -144,6 +168,7 @@ function matchColumns(row: ExcelJS.Row, maxCol: number): ColumnMap | null {
   const found: Partial<ColumnMap> = {};
   const hardware: Array<[string, number]> = [];
   const seenHardware = new Set<string>();
+  const activities: Array<[ActivityKey, number]> = [];
   for (let c = 1; c <= maxCol; c++) {
     const raw = cellToString(row.getCell(c));
     if (!raw) continue;
@@ -163,6 +188,8 @@ function matchColumns(row: ExcelJS.Row, maxCol: number): ColumnMap | null {
     else if (h === 'door schedule comments' && !found.scheduleComments) found.scheduleComments = c;
     else if (h === 'mena contractors comments' && !found.menaComments) found.menaComments = c;
     else if (h === 'qty' && !found.qty) found.qty = c;
+    else if (h === 'extra hinge fr' && !found.extraHinge) found.extraHinge = c;
+    else if (h in ACTIVITY_COLUMNS) activities.push([ACTIVITY_COLUMNS[h], c]);
     else if (h in HARDWARE_COLUMNS && !seenHardware.has(h)) {
       seenHardware.add(h);
       hardware.push([HARDWARE_COLUMNS[h], c]);
@@ -170,7 +197,7 @@ function matchColumns(row: ExcelJS.Row, maxCol: number): ColumnMap | null {
   }
 
   if (found.roomName && found.qty) {
-    return { ...(found as ColumnMap), hardware };
+    return { ...(found as ColumnMap), hardware, activities };
   }
   return null;
 }
@@ -363,6 +390,8 @@ export function groupDoors(doors: ParsedQuotationDoor[]): ParsedDoorGroupPreview
         source_rows: [d.source_row],
         hardware: d.hardware,
         match_room: d.room_name,
+        extra_hinges: d.extra_hinges,
+        activities: d.activities,
       });
     }
   }
@@ -510,12 +539,12 @@ export async function parseQuotationWorkbook(
   for (let r = headerRow + 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
 
-    if (sheetQtyTotal === null) {
-      const total = sumFormulaResult(row.getCell(cols.qty));
-      if (total !== null) {
-        sheetQtyTotal = total;
-        sheetQtyTotalRow = r;
-      }
+    // The sheet's own total: the largest SUM / SUBTOTAL in the QTY column, so
+    // per-level subtotals aren't mistaken for the grand total.
+    const total = sumFormulaResult(row.getCell(cols.qty));
+    if (total !== null && (sheetQtyTotal === null || total > sheetQtyTotal)) {
+      sheetQtyTotal = total;
+      sheetQtyTotalRow = r;
     }
 
     const doorLevel = get(row, cols.doorLevel);
@@ -532,6 +561,13 @@ export async function parseQuotationWorkbook(
     const leafs = get(row, cols.leafs);
     const schedComments = get(row, cols.scheduleComments);
     const menaComments = get(row, cols.menaComments);
+    // EXTRA HINGE (FR): 9 per extra hinge on the door (a double with 18 has one per leaf).
+    const extraHingeRaw = Number(get(row, cols.extraHinge));
+    const extraHinges = cols.extraHinge
+      ? Number.isFinite(extraHingeRaw) && extraHingeRaw > 0
+        ? Math.max(1, Math.round(extraHingeRaw / 9))
+        : 0
+      : null;
     const qtyRaw = get(row, cols.qty);
 
     // Skip blank rows, placeholder dot/dash rows (e.g. bottom SUM row), or section headers
@@ -555,13 +591,21 @@ export async function parseQuotationWorkbook(
     const hardware = [
       ...cols.hardware.map(([label, col]) => {
         const v = get(row, col).replace(/\|/g, '/');
-        if (isPlaceholder(v) || /^n\/?a$/i.test(v)) return '';
+        // "-", N, No, None, N/A, 0: no such hardware on this door.
+        if (isPlaceholder(v) || /^(n\/?a|n|no|none|nil|0)$/i.test(v)) return '';
         return /^y(es)?$/i.test(v) ? label : `${label}: ${v.toUpperCase()}`;
       }),
       ...commentItems([schedComments, menaComments].join(' ')),
+      extraHinges ? `Extra hinge ×${extraHinges}` : '',
     ]
       .filter(Boolean)
       .join(' · ');
+
+    const activityRaw: DoorActivities = {};
+    for (const [key, col] of cols.activities) {
+      const v = Number(get(row, col));
+      if (Number.isFinite(v) && v > 0) activityRaw[key] = Math.max(activityRaw[key] ?? 0, v);
+    }
 
     const makeDoor = (cleanEx: boolean): ParsedQuotationDoor => {
       const clean = (s: string) => (cleanEx ? s.replace(/\s*\(ex\.?\)\s*/gi, ' ').trim() : s.trim());
@@ -577,7 +621,10 @@ export async function parseQuotationWorkbook(
         qty: qtyNum,
         source_row: r,
         hardware,
+        extra_hinges: extraHinges,
         comments: [schedComments, menaComments].filter(Boolean).join(' | '),
+        // Raw costs for now; turned into quantities once every row is read.
+        activities: { ...activityRaw },
       };
     };
 
@@ -684,6 +731,17 @@ export async function parseQuotationWorkbook(
     doors.push(door);
   }
 
+  // Prep / install costs -> quantities (cost / the column's usual single cost),
+  // then part of each door's hardware so doors in a group need the same parts.
+  const allDoors = [...doors, ...excluded.flatMap((e) => (e.door ? [e.door] : []))];
+  const leavesOf = (d: ParsedQuotationDoor) =>
+    Math.max(1, (d.door_size?.split('x')[1] ?? '').split('+').filter(Boolean).length);
+  const rates = activityRates(allDoors.map((d) => ({ raw: d.activities, leaves: leavesOf(d) })));
+  for (const d of allDoors) {
+    d.activities = activityQuantities(d.activities, leavesOf(d), rates);
+    d.hardware = [d.hardware, activitiesToken(d.activities)].filter(Boolean).join(' · ');
+  }
+
   const groups = groupDoors(doors);
   issues.push(...summaryIssues(doors, groups, excluded, new Set(), sheetQtyTotal, sheetQtyTotalRow));
   const totalDoorQty = doors.reduce((sum, d) => sum + d.qty, 0);
@@ -702,6 +760,7 @@ export async function parseQuotationWorkbook(
     sheetQtyTotal,
     sheetQtyTotalRow,
     includedRows: [],
+    activityColumns: [...new Set(cols.activities.map(([key]) => key))],
   };
   return { ...result, report: buildReport(result) };
 }

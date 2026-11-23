@@ -134,7 +134,20 @@ export function normalizeSize(raw: string | null | undefined): string {
  * A room name as comparable words: abbreviations expanded, synonyms joined,
  * level / number and zone words dropped, each word once.
  */
+// Every group is compared with every set, so each name is tokenised once.
+const tokenCache = new Map<string, string[]>()
+
 export function normalizeRoomTokens(raw: string, keepZones = false): string[] {
+  const cacheKey = `${keepZones ? 'z' : '-'}|${raw}`
+  const cached = tokenCache.get(cacheKey)
+  if (cached) return cached
+  if (tokenCache.size > 5000) tokenCache.clear()
+  const tokens = tokenizeRoom(raw, keepZones)
+  tokenCache.set(cacheKey, tokens)
+  return tokens
+}
+
+function tokenizeRoom(raw: string, keepZones: boolean): string[] {
   const cleaned = raw
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, ' ')

@@ -36,6 +36,8 @@ export interface ProjectExportInput {
   sheets?: { id: string; name: string }[]
   /** Builder of the quote, added to the file name. */
   quoteName?: string
+  /** Added to the file name, e.g. the one sheet picked out of several. */
+  fileSuffix?: string
   /** Library parts, for each line's supplier (matched by part id, else SKU). */
   parts?: Pick<Part, 'id' | 'sku' | 'suppliers' | 'legend'>[]
 }
@@ -58,7 +60,6 @@ const BLUE_FILL = solid('FFBDD7EE') // overall price per door type, grand total
 const LIGHT_BLUE_FILL = solid('FFDEEBF7') // markup, deliveries
 const PEACH_FILL = solid('FFFBE5D6') // total before markup
 const REMARKS_FILL = solid('FFFFFF00') // MHQT REMARKS header
-const ADDED_FILL = solid('FFDCFCE7') // lines added to the standard set
 const NO_PRICE_FILL = solid('FFFEF3C7')
 const NO_PRICE_NOTE = 'No unit price — not included in totals'
 
@@ -298,7 +299,7 @@ export async function buildProjectExportWorkbook({
         row.getCell(12).value = { formula: `E${r}*$E$${g}`, result: qty * doorQty }
         if (line.mhqt_remarks?.trim()) row.getCell(13).value = line.mhqt_remarks.trim()
 
-        const added = line.origin === 'added'
+        // Lines the estimator added are highlighted in the grid only, not in the file.
         for (let c = 1; c <= 13; c++) {
           const cell = row.getCell(c)
           cell.font = { name: FONT, size: 10 }
@@ -309,7 +310,6 @@ export async function buildProjectExportWorkbook({
           }
           if (c <= 9) cell.border = { bottom: THIN }
           if (c >= 6 && c <= 10) cell.numFmt = ACCOUNTING_FMT
-          if (added && c <= 9) cell.fill = ADDED_FILL
           // Blank price: highlighted and noted, so it isn't mistaken for $0.
           if (!hasPrice && c >= 6 && c <= 9) cell.fill = NO_PRICE_FILL
         }
@@ -345,17 +345,22 @@ export async function buildProjectExportWorkbook({
   }
 }
 
+/** "<project> <builder>[ <suffix>]-v<n>.xlsx". */
+export function exportFileName(input: Pick<ProjectExportInput, 'projectName' | 'quoteName' | 'fileSuffix' | 'version'>): string {
+  const safeName = [input.projectName, input.quoteName ?? '', input.fileSuffix ?? '']
+    .filter((part) => part.trim())
+    .join(' ')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return `${safeName || 'project'}-v${input.version.version_no}.xlsx`
+}
+
 export async function downloadProjectExcel(input: ProjectExportInput): Promise<void> {
   const buffer = await buildProjectExportWorkbook(input)
   const blob = new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   })
-  const safeName = [input.projectName, input.quoteName ?? '']
-    .filter((part) => part.trim())
-    .join(' ')
-    .replace(/[^a-zA-Z0-9._-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-  const filename = `${safeName || 'project'}-v${input.version.version_no}.xlsx`
+  const filename = exportFileName(input)
 
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

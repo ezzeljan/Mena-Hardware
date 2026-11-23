@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyFlagRules, type FlagDoor } from '@/features/projects/doorFlags'
+import { applyFlagRules, commentItems, type FlagDoor } from '@/features/projects/doorFlags'
 import { sizeSetLines, type SizingLine, type SizingPart } from '@/features/projects/doorSizing'
 
 const part = (id: string, sku: string, legend: string, description: string): SizingPart => ({
@@ -69,5 +69,23 @@ describe('applyFlagRules', () => {
     const flagged = applyFlagRules(SET, [door('', 'Allowance for kick plate install')], 2, PARTS, make)
     const sized = sizeSetLines(flagged.lines, { classification: 'FIRE RATED', leaf: 'DOUBLE', door_size: '2040x720+720' }, PARTS)
     expect(sized.lines[1]).toMatchObject({ sku: 'KP1.2MM-CSK2', qty_per_door: 2, origin: 'added' })
+  })
+
+  it('ignores comments that rule the item out; "by others" only rules out items Mena would supply', () => {
+    expect(commentItems('No kick plate')).toEqual([])
+    expect(commentItems('Kick plate by builder')).toEqual([])
+    expect(commentItems('Kick plate not required. Peep hole by others')).toEqual([])
+    expect(commentItems('Card reader not required')).toEqual([])
+    // The CR / L25 lines are themselves "by others".
+    expect(commentItems('CR Card Reader by others. Allowance for kick plate install')).toEqual(['Card reader', 'Kick plate'])
+    expect(commentItems('Vingcard not allowed')).toEqual(['Vingcard'])
+    const r = applyFlagRules(SET, [door('Closer', 'No kick plate, card reader not required')], 1, PARTS, make)
+    expect(r.lines).toEqual(SET)
+  })
+
+  it('counts a set line without a legend as already having the item (by its description)', () => {
+    const withFsh: Line[] = [...SET, { sku: 'BYOFSH', description: 'FSH HIGH SECURITY MONITORED ELECTRIC STRIKE', qty_per_door: 1, unit_price: null, part_id: null, origin: 'set' }]
+    const r = applyFlagRules(withFsh, [door('ES: ES')], 1, PARTS, make)
+    expect(r.lines.map((l) => l.sku)).toEqual(['1500BCSIL', 'BYOFSH', 'CARDREADER'])
   })
 })

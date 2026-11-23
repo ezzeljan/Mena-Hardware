@@ -118,6 +118,35 @@ describe('sizeSetLines', () => {
     expect(odd.lines[0].qty_per_door).toBe(6)
   })
 
+  it('adds the EXTRA HINGE hinges to the hinge line when the schedule gives them', () => {
+    const single = sizeSetLines(FIRE_SINGLE, { classification: 'FIRE RATED', leaf: 'SINGLE', door_size: '2340x920', extra_hinges: 1 }, PARTS)
+    expect(single.lines[0].qty_per_door).toBe(4)
+    expect(single.notes[0]).toBe('Hinges 3 → 4 (EXTRA HINGE: +1)')
+    const double = sizeSetLines([line('MMHINGE', 'HINGES', 6)], { classification: 'FIRE RATED', leaf: 'DOUBLE', door_size: '2340x920+920', extra_hinges: 2 }, PARTS)
+    expect(double.lines[0].qty_per_door).toBe(8)
+    // The schedule says no extra hinge: none added, even on a tall fire door.
+    const none = sizeSetLines(FIRE_SINGLE, { classification: 'FIRE RATED', leaf: 'SINGLE', door_size: '2340x920', extra_hinges: 0 }, PARTS)
+    expect(none.lines[0].qty_per_door).toBe(3)
+    // Only the first hinge line gets them.
+    const two = sizeSetLines([line('MMHINGE', 'HINGES', 3), line('MMHINGE', 'HINGES', 3)], { classification: 'NON RATED', leaf: 'SINGLE', door_size: '2040x920', extra_hinges: 1 }, PARTS)
+    expect(two.lines.map((l) => l.qty_per_door)).toEqual([4, 3])
+  })
+
+  it('without an EXTRA HINGE column: non-rated doors over 2400 get one more hinge per leaf', () => {
+    const tall = sizeSetLines(FIRE_SINGLE, { classification: 'NON RATED', leaf: 'SINGLE', door_size: '2560x1038' }, PARTS)
+    expect(tall.lines[0].qty_per_door).toBe(4)
+    expect(tall.notes[0]).toBe('Hinges 3 → 4 (non rated, 2560 high)')
+    const atLimit = sizeSetLines(FIRE_SINGLE, { classification: 'NON RATED', leaf: 'SINGLE', door_size: '2400x920' }, PARTS)
+    expect(atLimit.lines[0].qty_per_door).toBe(3)
+  })
+
+  it('keeps the set price when the swapped part has no cost in the library', () => {
+    const parts = PARTS.map((p) => (p.id === 'bwls' ? { ...p, unit_cost: null } : p))
+    const r = sizeSetLines(FIRE_SINGLE, { classification: 'NON RATED', leaf: 'SINGLE', door_size: '2340x920' }, parts)
+    expect(r.lines[2]).toMatchObject({ sku: 'NHBWSLSDS', unit_price: 5 })
+    expect(r.notes).toContain('BWLS: no cost in the parts library — kept the set price')
+  })
+
   it('swaps a long seal back to short on a low door', () => {
     const r = sizeSetLines([line('NHBWSLSDS', 'SEAL', 1)], { classification: 'NON RATED', leaf: 'SINGLE', door_size: '2040x820' }, PARTS)
     expect(r.lines[0].sku).toBe('NHBWSSDS')

@@ -197,6 +197,65 @@ describe('parseQuotationWorkbook', () => {
     expect(res.totalDoorQty).toBe(4);
   });
 
+  it('reads EXTRA HINGE (FR): 9 = one hinge; part of the hardware, so doors with and without split', async () => {
+    const headers = ['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'Self Closing', 'QTY', 'EXTRA HINGE (FR)'];
+    const rows: (string | number | null)[][] = [
+      ['L1', 'D63', 'C', 'Fire Stair', 'F', '-/120/30', 'FR2', 2340, 870, '-', 1, 'Y', 2, 9],
+      ['L1', 'D63', 'C', 'Fire Stair', 'F', '-/120/30', 'FR2', 2340, 870, '-', 1, 'Y', 1, null],
+      ['L1', 'D61', 'C', 'Waste', 'F', '-/120/30', 'FR2', 2340, 920, 920, 2, 'Y', 1, 18],
+    ];
+    const res = await parseQuotationWorkbook(await buildSampleWorkbook('Quotation Test', headers, rows));
+    expect(res.groups.map((g) => [g.door_tag, g.door_qty, g.extra_hinges, g.hardware])).toEqual([
+      ['D63', 2, 1, 'Closer · Extra hinge ×1'],
+      ['D63', 1, 0, 'Closer'],
+      ['D61', 1, 2, 'Closer · Extra hinge ×2'],
+    ]);
+    // No such column: unknown (sizing falls back to the height rule).
+    const plain = await parseQuotationWorkbook(
+      await buildSampleWorkbook('Quotation Test', headers.slice(0, 13), rows.map((r) => r.slice(0, 13)))
+    );
+    expect(plain.groups[0].extra_hinges).toBeNull();
+  });
+
+  it('treats N / No / 0 hardware cells as none, and checks against the largest SUM (not a subtotal)', async () => {
+    const headers = ['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'Lock', 'Bolt', 'QTY'];
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Quotation');
+    ws.addRow(['MENA']);
+    ws.addRow(['DOOR SCHEDULE']);
+    ws.addRow(['LOCATION']);
+    ws.addRow(headers);
+    const grand = ws.addRow([]);
+    grand.getCell(14).value = { formula: 'SUM(N6:N20)', result: 3 } as ExcelJS.CellFormulaValue;
+    ws.addRow(['L1', 'D02', 'A', 'Bedroom', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 'Y', 'N', 1]);
+    ws.addRow(['L1', 'D02', 'B', 'Bedroom', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 'Y', '-', 1]);
+    const sub = ws.addRow(['L1 subtotal']);
+    sub.getCell(14).value = { formula: 'SUM(N6:N7)', result: 2 } as ExcelJS.CellFormulaValue;
+    ws.addRow(['L2', 'D02', 'C', 'Bedroom', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 'Y', 'No', 1]);
+    const res = await parseQuotationWorkbook((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+    expect(res.groups).toHaveLength(1);
+    expect(res.groups[0]).toMatchObject({ hardware: 'Lock', door_qty: 3 });
+    expect(res.sheetQtyTotal).toBe(3);
+    expect(res.issues.some((i) => i.kind === 'total')).toBe(false);
+  });
+
+  it('reads PREPARATION / INSTALLATION costs as parts with quantities; doors with different ones split', async () => {
+    const headers = ['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'QTY', 'CLOSER', 'STOP', 'CONC SEAL PREP', 'FRAME SEAL INST'];
+    const rows: (string | number | null)[][] = [
+      ['L1', 'D63', 'C', 'Fire Stair', 'F', '-/120/30', 'FR2', 2040, 870, '-', 1, 2, 22, 7, 32, 26],
+      ['L2', 'D63', 'C', 'Fire Stair', 'F', '-/120/30', 'FR2', 2040, 870, '-', 1, 1, 22, null, 32, 26],
+      ['L1', 'D61', 'C', 'Waste', 'F', '-/120/30', 'FR2', 2040, 920, 920, 2, 1, 44, 14, 64, 38],
+    ];
+    const res = await parseQuotationWorkbook(await buildSampleWorkbook('Quotation Test', headers, rows));
+    expect(res.activityColumns.sort()).toEqual(['closer', 'dropseal', 'frameseal', 'stop']);
+    expect(res.groups.map((g) => [g.door_tag, g.door_qty, g.activities])).toEqual([
+      ['D63', 2, { closer: 1, stop: 1, dropseal: 1, frameseal: 1 }],
+      ['D63', 1, { closer: 1, dropseal: 1, frameseal: 1 }],
+      ['D61', 1, { closer: 2, stop: 2, dropseal: 2, frameseal: 1 }],
+    ]);
+    expect(res.groups[2].hardware).toBe('Prep: Stop ×2, Closer ×2, Drop seal ×2, Frame seal');
+  });
+
   it('throws a clear error when no Door Schedule sheet is found', async () => {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Summary');

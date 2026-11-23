@@ -1403,6 +1403,22 @@ test('Supplier sheets: add a sheet, flag other-supplier parts, rename, export bo
   expect(wb.worksheets.map((w) => w.name)).toEqual(['MM', 'Novas (option B)'])
   expect(wb.getWorksheet('MM')!.getCell('C7').value).toBe('MMHINGE')
   expect(wb.getWorksheet('Novas (option B)')!.getCell('C7').value).toBe('NV-HINGE')
+
+  // Export only the Novas sheet: untick MM; the file has that sheet alone and its name.
+  await page.getByRole('button', { name: 'Export Excel' }).click()
+  const exportDialog = page.getByRole('dialog', { name: 'Export Excel' })
+  await expect(exportDialog.getByRole('checkbox', { name: 'MM' })).toBeChecked()
+  await exportDialog.getByRole('checkbox', { name: 'MM' }).uncheck()
+  await exportDialog.getByRole('checkbox', { name: 'Novas (option B)' }).uncheck()
+  await expect(exportDialog.getByRole('button', { name: 'Download' })).toBeDisabled()
+  await exportDialog.getByRole('checkbox', { name: 'Novas (option B)' }).check()
+  const onePromise = page.waitForEvent('download')
+  await exportDialog.getByRole('button', { name: 'Download' }).click()
+  const one = await onePromise
+  expect(one.suggestedFilename()).toMatch(/Novas_option_B-v1.xlsx$/)
+  const wb2 = new ExcelJS.Workbook()
+  await wb2.xlsx.readFile((await one.path())!)
+  expect(wb2.worksheets.map((w) => w.name)).toEqual(['Novas (option B)'])
 })
 
 test('PM comments on one supplier sheet', async ({ page }) => {

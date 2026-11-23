@@ -3,8 +3,11 @@
  * its lines are copied onto a door group, size-dependent items are adjusted to
  * the group's actual door (taken from how suppliers price the Mena schedules):
  *
- *   - Hinges: fire-rated doors taller than 2100 mm get 4 hinges per leaf
- *     instead of 3 (only when the set has the standard 3 per leaf).
+ *   - Hinges: the schedule's EXTRA HINGE (FR) column says how many hinges to
+ *     add per door (9 = one hinge; a double with 18 gets one per leaf). When
+ *     the sheet has no such column, tall doors get one more hinge per leaf:
+ *     fire rated over 2100 mm, non rated over 2400 mm (only when the set has
+ *     the standard 3 per leaf).
  *   - Perimeter seals: short set (BWS / BWD) up to 2100 mm high, long set
  *     (BWLS / BWLD) above.
  *   - Drop seals and kick plates (MB, FB, KP legends): the smallest size from
@@ -15,8 +18,9 @@
  */
 
 export const TALL_DOOR_MM = 2100;
+/** Non-rated doors taller than this get an extra hinge per leaf (no EXTRA HINGE column). */
+export const TALL_NON_RATED_DOOR_MM = 2400;
 const HINGES_PER_LEAF_STANDARD = 3;
-const HINGES_PER_LEAF_TALL_FIRE = 4;
 
 /** Short / long perimeter seal pairs, by legend. */
 const HEIGHT_PAIRS: Array<[short: string, long: string]> = [
@@ -49,6 +53,8 @@ export interface SizingDoor {
   classification: string | null;
   leaf: string | null;
   door_size: string | null;
+  /** Extra hinges per door from the EXTRA HINGE (FR) column; null/undefined when the sheet has none. */
+  extra_hinges?: number | null;
 }
 
 export interface SizedLines<L extends SizingLine> {
@@ -86,42 +92,77 @@ function widthFamily(legend: string): string | null {
   return WIDTH_FAMILIES.includes(prefix) ? prefix : null;
 }
 
+/** The parts library indexed once, shared by every group's sizing and flag rules. */
+export interface PartIndex {
+  all: SizingPart[];
+  active: SizingPart[];
+  byId: Map<string, SizingPart>;
+  bySku: Map<string, SizingPart>;
+}
+
+export function makePartIndex(parts: SizingPart[]): PartIndex {
+  return {
+    all: parts,
+    active: parts.filter((p) => p.active),
+    byId: new Map(parts.map((p) => [p.id, p])),
+    bySku: new Map(parts.map((p) => [p.sku.trim().toUpperCase(), p])),
+  };
+}
+
+export const toPartIndex = (parts: SizingPart[] | PartIndex): PartIndex =>
+  Array.isArray(parts) ? makePartIndex(parts) : parts;
+
 export function sizeSetLines<L extends SizingLine>(
   lines: L[],
   door: SizingDoor,
-  parts: SizingPart[]
+  parts: SizingPart[] | PartIndex
 ): SizedLines<L> {
   const size = parseDoorSize(door.door_size);
   if (!size || lines.length === 0) return { lines, notes: [] };
 
-  const partById = new Map(parts.map((p) => [p.id, p]));
-  const partBySku = new Map(parts.map((p) => [p.sku.trim().toUpperCase(), p]));
-  const active = parts.filter((p) => p.active);
+  const { byId: partById, bySku: partBySku, active } = toPartIndex(parts);
   const leaves = size.widths.length;
   const leafWidth = Math.max(...size.widths);
   const tall = size.height > TALL_DOOR_MM;
   const fireRated = door.classification === 'FIRE RATED';
   const notes: string[] = [];
+  let hingesDone = false;
 
-  const swapTo = (line: L, part: SizingPart): L => ({
-    ...line,
-    sku: part.sku,
-    description: part.description,
-    part_id: part.id,
-    unit_price: part.unit_cost,
-  });
+  // A swapped line takes the new part's cost; when the library has none, the
+  // set's price is kept (and noted) rather than left blank.
+  const swapTo = (line: L, part: SizingPart): L => {
+    const keepPrice = part.unit_cost == null && line.unit_price != null;
+    if (keepPrice) {
+      notes.push(`${part.legend || part.sku}: no cost in the parts library — kept the set price`);
+    }
+    return {
+      ...line,
+      sku: part.sku,
+      description: part.description,
+      part_id: part.id,
+      unit_price: keepPrice ? line.unit_price : part.unit_cost,
+    };
+  };
 
   const out = lines.map((line) => {
     const part = (line.part_id ? partById.get(line.part_id) : undefined) ?? partBySku.get(line.sku.trim().toUpperCase());
     const legend = (part?.legend ?? '').trim().toUpperCase();
 
-    // Hinges: 4 per leaf on tall fire-rated doors.
-    if (fireRated && tall && isHinge(`${line.description} ${part?.description ?? ''}`)) {
-      const standard = HINGES_PER_LEAF_STANDARD * leaves;
-      const target = HINGES_PER_LEAF_TALL_FIRE * leaves;
-      if (Number(line.qty_per_door) === standard) {
-        notes.push(`Hinges ${standard} → ${target} (fire rated, ${size.height} high)`);
-        return { ...line, qty_per_door: target };
+    // Hinges: extra hinges from the schedule, or by height when it doesn't say.
+    if (!hingesDone && isHinge(`${line.description} ${part?.description ?? ''}`)) {
+      hingesDone = true; // only the first hinge line gets the extra hinges
+      const qty = Number(line.qty_per_door);
+      if (door.extra_hinges != null) {
+        if (door.extra_hinges <= 0) return line;
+        notes.push(`Hinges ${qty} → ${qty + door.extra_hinges} (EXTRA HINGE: +${door.extra_hinges})`);
+        return { ...line, qty_per_door: qty + door.extra_hinges };
+      }
+      const tallForRating = fireRated ? tall : size.height > TALL_NON_RATED_DOOR_MM;
+      if (tallForRating && qty === HINGES_PER_LEAF_STANDARD * leaves) {
+        notes.push(
+          `Hinges ${qty} → ${qty + leaves} (${fireRated ? 'fire rated' : 'non rated'}, ${size.height} high)`
+        );
+        return { ...line, qty_per_door: qty + leaves };
       }
       return line;
     }

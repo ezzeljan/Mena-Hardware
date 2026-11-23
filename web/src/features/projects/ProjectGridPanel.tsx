@@ -183,6 +183,7 @@ export function ProjectGridPanel({
           origin: line.origin,
           part_id: line.part_id,
           mhqt_remarks: line.mhqt_remarks ?? '',
+          review_flag: line.review_flag ?? '',
         },
       ]
     })
@@ -436,7 +437,7 @@ export function ProjectGridPanel({
         part_id: null,
       })
       .select(
-        'id, group_id, sheet_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, created_at, updated_at',
+        'id, group_id, sheet_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, review_flag, created_at, updated_at',
       )
       .single()
 
@@ -451,6 +452,13 @@ export function ProjectGridPanel({
     setSaveStatus('saved')
     focusCell(created.id, 0)
     startEditing(created, 0)
+  }
+
+  // The estimator has checked a flagged line: clear the flag (saved like any edit).
+  const handleClearFlag = (line: ProjectLine) => {
+    if (!editable) return
+    setLines((prev) => prev.map((l) => (l.id === line.id ? { ...l, review_flag: '' } : l)))
+    scheduleAutosave(line.id)
   }
 
   const handleDeleteLine = async (line: ProjectLine) => {
@@ -924,6 +932,7 @@ export function ProjectGridPanel({
                     renderEditableCell={renderEditableCell}
                     onAddLine={() => void handleAddLine(group.id)}
                     onDeleteLine={(line) => void handleDeleteLine(line)}
+                    onClearFlag={handleClearFlag}
                     onMoveLine={(line, dir) =>
                       void handleMoveLine(group.id, line, dir)
                     }
@@ -943,7 +952,8 @@ export function ProjectGridPanel({
           projectId={activeVersion.project_id}
           busy={exporting}
           error={exportError}
-          onExport={async ({ scheduleNo, sheetTitle }) => {
+          sheets={sheets}
+          onExport={async ({ scheduleNo, sheetTitle, sheetIds }) => {
             setExporting(true)
             setExportError(null)
             try {
@@ -959,8 +969,14 @@ export function ProjectGridPanel({
                 version: { ...activeVersion, markup_pct: markupPct },
                 groups,
                 lines,
-                sheets,
+                // Only the sheets ticked in the dialog.
+                sheets: sheets.filter((s) => sheetIds.includes(s.id)),
                 quoteName: clientName,
+                // One sheet picked out of several: its name goes in the file name.
+                fileSuffix:
+                  sheets.length > 1 && sheetIds.length === 1
+                    ? sheets.find((s) => s.id === sheetIds[0])?.name
+                    : undefined,
                 parts,
               })
               setExportOpen(false)

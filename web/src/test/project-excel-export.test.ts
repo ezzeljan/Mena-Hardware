@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import ExcelJS from 'exceljs'
 import type { DoorGroup, ProjectLine, ProjectVersion } from '@/types/database'
-import { buildProjectExportWorkbook, worksheetNames } from '@/features/projects/projectExcelExport'
+import {
+  buildProjectExportWorkbook,
+  exportFileName,
+  worksheetNames,
+} from '@/features/projects/projectExcelExport'
 
 describe('buildProjectExportWorkbook', () => {
-  it('exports the NOVAS Template layout with markup, formulas, blank prices, and green added rows', async () => {
+  it('exports the NOVAS Template layout with markup, formulas, blank prices, and no fill on added rows', async () => {
     const version: ProjectVersion = {
       id: 'v1',
       project_id: 'p1',
@@ -165,7 +169,10 @@ describe('buildProjectExportWorkbook', () => {
     expect(ws!.getCell('F8').value).toBeNull()
     expect(ws!.getCell('I8').value).toBeNull()
     expect((ws!.getCell('F8').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFFEF3C7')
-    expect((ws!.getCell('C8').fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFDCFCE7')
+    // Added lines are highlighted in the grid only: no green fill in the file.
+    for (const ref of ['A8', 'C8', 'E8']) {
+      expect((ws!.getCell(ref).fill as ExcelJS.FillPattern | undefined)?.fgColor?.argb).toBeUndefined()
+    }
 
     expect(ws!.getCell('A1').isMerged).toBe(true)
   })
@@ -253,5 +260,14 @@ describe('worksheetNames', () => {
       'Sheet 4',
       'quoted',
     ])
+  })
+})
+
+describe('exportFileName', () => {
+  const version = { version_no: 3 } as ProjectVersion
+  it('adds the suffix (the one sheet picked) to the file name', () => {
+    expect(exportFileName({ projectName: 'McLaren St', quoteName: 'Decode', version, fileSuffix: 'NOVAS' })).toBe('McLaren_St_Decode_NOVAS-v3.xlsx')
+    expect(exportFileName({ projectName: 'McLaren St', quoteName: 'Decode', version })).toBe('McLaren_St_Decode-v3.xlsx')
+    expect(exportFileName({ projectName: 'McLaren St', version })).toBe('McLaren_St-v3.xlsx')
   })
 })

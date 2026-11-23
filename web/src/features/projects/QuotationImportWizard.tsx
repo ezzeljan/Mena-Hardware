@@ -32,12 +32,14 @@ import {
   type QuotationParseResult,
 } from '@/features/projects/quotationParser'
 import {
+  makePartIndex,
   parseDoorSize,
   sizeSetLines,
   type SizedLines,
   type SizingPart,
 } from '@/features/projects/doorSizing'
 import { applyFlagRules } from '@/features/projects/doorFlags'
+import { applyActivityRules } from '@/features/projects/activityRules'
 import { makeGroupFinder } from '@/features/projects/groupKey'
 import { parseQuotationInBackground } from '@/features/projects/quotationParseClient'
 import {
@@ -113,6 +115,8 @@ interface SetLineDraft {
   part_id: string | null
   /** 'added': an item the schedule asks for that the set doesn't have. */
   origin: 'set' | 'added'
+  /** Why the estimator should check the line (a set part the quotation doesn't price). */
+  review_flag?: string
 }
 
 const WIZARD_STEPS: StepperStep[] = [
@@ -236,12 +240,31 @@ export function QuotationImportWizard({
   // asks for (ES, CR, RS, kick plate, Vingcard, viewer; see doorFlags.ts), then
   // sized for the group's door (hinges, seal lengths, drop seal / kick plate
   // widths; see doorSizing.ts).
+  // Built once per load / parse, not per group or per keystroke.
+  const partIndex = useMemo(() => makePartIndex(partsQuery.data ?? []), [partsQuery.data])
+  const doorByRow = useMemo(
+    () => new Map((parseResult?.doors ?? []).map((d) => [d.source_row, d])),
+    [parseResult],
+  )
+  // A group's sized lines only depend on its set (and the parse / library), so
+  // they're kept per group + set: typing a custom name or confirming a match
+  // doesn't redo them. A new parse or parts load starts a fresh cache.
+  const sizingCache = useMemo(
+    () => new Map<string, SizedLines<SetLineDraft> & { flagNotes: string[] }>(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [partIndex, doorByRow, setById, partBySku],
+  )
+
   const sizedLinesByGroup = useMemo(() => {
     const map = new Map<string, SizedLines<SetLineDraft> & { flagNotes: string[] }>()
-    const parts = partsQuery.data ?? []
-    const doorByRow = new Map((parseResult?.doors ?? []).map((d) => [d.source_row, d]))
     for (const m of draftMatches) {
       if (m.carriedFromGroupId || !m.matchedSetId) continue
+      const cacheKey = `${m.group.group_key}|${m.matchedSetId}`
+      const cached = sizingCache.get(cacheKey)
+      if (cached) {
+        map.set(m.group.group_key, cached)
+        continue
+      }
       const set = setById.get(m.matchedSetId)
       const setLines: SetLineDraft[] = [...(set?.standard_set_lines ?? [])]
         .sort((a: StandardSetLine, b: StandardSetLine) => a.position - b.position)
@@ -256,51 +279,69 @@ export function QuotationImportWizard({
       const doors = m.group.source_rows
         .map((r) => doorByRow.get(r))
         .filter((d): d is NonNullable<typeof d> => !!d)
-      const flagged = applyFlagRules(
+      const leaves = parseDoorSize(m.group.door_size)?.widths.length ?? 1
+      const addedLine = (part: SizingPart, qty: number): SetLineDraft => ({
+        sku: part.sku,
+        description: part.description,
+        qty_per_door: qty,
+        unit_price: part.unit_cost,
+        part_id: part.id,
+        origin: 'added',
+      })
+      // Prep / install costs first: add priced parts the set lacks, raise
+      // quantities, flag set parts that aren't priced (doorActivities.ts).
+      const priced = applyActivityRules(
         setLines,
-        doors,
-        parseDoorSize(m.group.door_size)?.widths.length ?? 1,
-        parts,
-        (part, qty) => ({
-          sku: part.sku,
-          description: part.description,
-          qty_per_door: qty,
-          unit_price: part.unit_cost,
-          part_id: part.id,
-          origin: 'added' as const,
-        }),
+        {
+          activities: m.group.activities ?? {},
+          leaf: m.group.leaf,
+          comments: doors.map((d) => d.comments).join(' | '),
+          leaves,
+        },
+        parseResult?.activityColumns ?? [],
+        partIndex,
+        addedLine,
       )
-      const sized = sizeSetLines(flagged.lines, m.group, parts)
-      map.set(m.group.group_key, { ...sized, flagNotes: flagged.notes })
+      const flagged = applyFlagRules(priced.lines, doors, leaves, partIndex, addedLine)
+      const sized = sizeSetLines(flagged.lines, m.group, partIndex)
+      const entry = { ...sized, flagNotes: [...priced.notes, ...flagged.notes] }
+      sizingCache.set(cacheKey, entry)
+      map.set(m.group.group_key, entry)
     }
     return map
-  }, [draftMatches, setById, partBySku, partsQuery.data, parseResult])
+  }, [draftMatches, setById, partBySku, partIndex, doorByRow, sizingCache, parseResult])
 
+  // Each group's candidate sets depend only on the parse and the sets, not on
+  // the estimator's choices, so they're worked out once per parse.
   const candidateMap = useMemo(() => {
     const map = new Map<string, GroupMatchResult>()
     if (standardSets.length === 0) return map
-    for (const item of draftMatches) {
+    for (const g of parseResult?.groups ?? []) {
       map.set(
-        item.group.group_key,
+        g.group_key,
         matchDoorGroup(
           {
-            id: item.group.group_key,
+            id: g.group_key,
             // A merged group is matched on its room with the most doors.
-            room_name: item.group.match_room || item.group.room_name,
-            classification: item.group.classification ?? '',
-            leaf: item.group.leaf ?? '',
-            door_size: item.group.door_size ?? '',
+            room_name: g.match_room || g.room_name,
+            classification: g.classification ?? '',
+            leaf: g.leaf ?? '',
+            door_size: g.door_size ?? '',
           },
           standardSets,
         ),
       )
     }
     return map
-  }, [draftMatches, standardSets])
+  }, [parseResult, standardSets])
 
   const initializeMatchesFromParse = useCallback(
-    (result: QuotationParseResult) => {
+    (result: QuotationParseResult, keep?: Map<string, DraftGroupMatch>) => {
       const next: DraftGroupMatch[] = result.groups.map((g) => {
+        // A group that was already here keeps the estimator's choice (its
+        // doors may have changed when a row was included).
+        const kept = keep?.get(g.group_key)
+        if (kept) return { ...kept, group: g }
         // Re-import: an unchanged door group keeps what it had.
         const base = isReimport ? findBaseGroup(g.group_key) : undefined
         if (base) {
@@ -410,7 +451,8 @@ export function QuotationImportWizard({
     else rows.add(row)
     const next = applyRowInclusions(baseParse, rows)
     setParseResult(next)
-    initializeMatchesFromParse(next)
+    // Groups that are still there keep their matches; new ones are matched.
+    initializeMatchesFromParse(next, new Map(draftMatches.map((m) => [m.group.group_key, m])))
   }
 
   const runAutoMatch = () => {
@@ -644,6 +686,7 @@ export function QuotationImportWizard({
             unit_price: line.unit_price,
             origin: line.origin,
             part_id: line.part_id,
+            review_flag: line.review_flag ?? '',
           })),
         }
       })
@@ -792,6 +835,10 @@ export function QuotationImportWizard({
     return sum + (sizedLinesByGroup.get(m.group.group_key)?.lines.length ?? 0)
   }, 0)
   const sizedGroupCount = [...sizedLinesByGroup.values()].filter((s) => s.notes.length > 0).length
+  const flaggedLineCount = [...sizedLinesByGroup.values()].reduce(
+    (n, s) => n + s.lines.filter((l) => l.review_flag).length,
+    0,
+  )
   const addedLineCount = [...sizedLinesByGroup.values()].reduce(
     (n, s) => n + s.lines.filter((l) => l.origin === 'added').length,
     0,
@@ -1446,6 +1493,7 @@ export function QuotationImportWizard({
                 <div>Hardware Lines: {totalCopiedLines}</div>
                 <div>Groups Sized for Door: {sizedGroupCount}</div>
                 <div>Lines Added from Schedule: {addedLineCount}</div>
+                <div>Lines Flagged to Check: {flaggedLineCount}</div>
                 {isReimport && <div>Kept From v{baseVersion?.version_no}: {keptCount}</div>}
               </div>
             </div>

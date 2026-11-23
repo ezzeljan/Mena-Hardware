@@ -44,6 +44,8 @@ function parsed(key: string, qty: number): ParsedDoorGroupPreview {
     source_rows: [1],
     hardware: key.split(' | ').slice(5).join(' | '),
     match_room: key,
+    extra_hinges: null,
+    activities: {},
   }
 }
 

@@ -214,6 +214,8 @@ export interface ProjectLine {
   part_id: string | null
   /** "MHQT REMARKS" column (migration 019); '' when empty. */
   mhqt_remarks?: string
+  /** Why the estimator should check this line ('' when nothing to check; migration 024). */
+  review_flag?: string
   created_at: string
   updated_at: string
 }

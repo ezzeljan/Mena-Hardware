@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, MessageSquare, Plus, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Flag, MessageSquare, Plus, Trash2 } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import type { DoorGroup, ProjectLine } from '@/types/database'
 import { groupKeyHardware } from '@/features/projects/groupKey'
@@ -19,7 +19,7 @@ export const GRID_COLUMNS: { label: string; align?: 'right' | 'center' }[] = [
   { label: 'DOOR CLASSIFICATION' },
   { label: 'LEAFS' },
   { label: 'LEGEND' },
-  { label: 'SUPPLIER' },
+  { label: 'MANUFACTURER' },
   { label: 'PART NUMBER (SKU)' },
   { label: 'DESCRIPTION' },
   { label: 'QTY', align: 'right' },
@@ -64,6 +64,8 @@ interface GroupRowsFragmentProps {
   ) => ReactNode
   onAddLine: () => void
   onDeleteLine: (line: ProjectLine) => void
+  /** Clears a line's review flag (the estimator has checked it). */
+  onClearFlag?: (line: ProjectLine) => void
   onMoveLine: (line: ProjectLine, dir: -1 | 1) => void
 }
 
@@ -85,6 +87,7 @@ export function GroupRowsFragment({
   onAddLine,
   onDeleteLine,
   onMoveLine,
+  onClearFlag,
 }: GroupRowsFragmentProps) {
   const rowRef = useRef<HTMLTableRowElement | null>(null)
 
@@ -106,9 +109,8 @@ export function GroupRowsFragment({
       {/* Door Group Header Row (matches Excel DOOR HARDWARE SET sheet) */}
       <tr
         ref={rowRef}
-        className={`font-semibold text-neutral-950 transition-colors ${
-          highlighted ? 'bg-amber-100' : 'bg-neutral-100'
-        }`}
+        className={`font-semibold text-neutral-950 transition-colors ${highlighted ? 'bg-amber-100' : 'bg-neutral-100'
+          }`}
         data-group-id={group.id}
       >
         <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
@@ -149,9 +151,12 @@ export function GroupRowsFragment({
         </td>
         <td className="border border-neutral-300 px-2 py-1" />
         <td className="border border-neutral-300 px-2 py-1" />
-        <td className="border border-neutral-300 px-2 py-1" />
+        {/* As in the Excel export: the label in DESCRIPTION, only the number in QTY. */}
+        <td className="border border-neutral-300 px-2 py-1 text-right font-mono whitespace-nowrap">
+          DOOR QTY:
+        </td>
         <td className="border border-neutral-300 px-2 py-1 text-right font-mono bg-neutral-200/70 whitespace-nowrap">
-          DOOR QTY: {group.door_qty}
+          {group.door_qty}
         </td>
         <td className="border border-neutral-300 px-2 py-1" />
         <td className="border border-neutral-300 px-2 py-1 text-right font-mono whitespace-nowrap">
@@ -196,9 +201,34 @@ export function GroupRowsFragment({
         const addedBg = isAdded ? 'bg-green-100/80' : ''
         const noPriceBg = cost === null ? 'bg-amber-50' : addedBg
 
+        const flag = line.review_flag?.trim() ?? ''
+
         return (
-          <tr key={line.id} className="bg-white">
-            <td className={CELL} />
+          <tr
+            key={line.id}
+            className={flag ? 'bg-orange-50' : 'bg-white'}
+            data-flagged={flag ? 'true' : undefined}
+          >
+            <td className={`${CELL} whitespace-nowrap`}>
+              {/* Flagged on import (e.g. a set part the quotation doesn't price): check, then clear. */}
+              {flag && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-orange-700" title={flag}>
+                  <Flag className="h-3 w-3" aria-hidden="true" />
+                  <span>Check</span>
+                  {editable && onClearFlag && (
+                    <button
+                      type="button"
+                      className="ml-1 rounded border border-orange-300 bg-white px-1 text-[10px] font-medium text-orange-800 hover:bg-orange-100"
+                      aria-label={`Clear flag: ${flag}`}
+                      title={`${flag} — click when checked`}
+                      onClick={() => onClearFlag(line)}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </span>
+              )}
+            </td>
             <td className={CELL} />
             <td className={CELL} />
             <td className={CELL} />
