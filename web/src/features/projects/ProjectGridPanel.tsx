@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -7,6 +8,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { GridSkeleton } from '@/components/ui/skeleton'
 import { fetchAllRows } from '@/lib/fetchAll'
 import { formatCurrency } from '@/lib/utils'
 import { parseNullablePriceInput } from '@/lib/schemas'
@@ -55,6 +57,12 @@ interface ProjectGridPanelProps {
    * nothing is left unsaved. Used to save before submitting (B6).
    */
   onRegisterSavePending?: (savePending: (() => Promise<boolean>) | null) => void
+  /** Shown under the grid in a bar pinned to the bottom of the screen (the sheet tabs). */
+  footer?: ReactNode
+  /** Where the Export Excel button is drawn (the page's button row). */
+  exportSlot?: HTMLElement | null
+  /** The version's sheets are still loading (lines are shown per sheet). */
+  sheetsLoading?: boolean
 }
 
 type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error'
@@ -71,8 +79,60 @@ export function ProjectGridPanel({
   onOpenComments,
   highlightGroupId = null,
   onRegisterSavePending,
+  footer,
+  exportSlot = null,
+  sheetsLoading = false,
 }: ProjectGridPanelProps) {
   const queryClient = useQueryClient()
+
+  // The grid's visible horizontal scrollbar lives in the bar pinned to the
+  // bottom of the screen (with the sheet tabs). The grid still scrolls
+  // sideways natively (trackpad, Shift + wheel, touch), but its own scrollbar
+  // is clipped off (hBarHeight), so there's never a second one on screen.
+  const gridScrollRef = useRef<HTMLDivElement | null>(null)
+  // Also kept in state so the observers attach once the grid is on screen.
+  const [gridEl, setGridEl] = useState<HTMLDivElement | null>(null)
+  const setGridScroll = useCallback((el: HTMLDivElement | null) => {
+    gridScrollRef.current = el
+    setGridEl(el)
+  }, [])
+  const hScrollRef = useRef<HTMLDivElement>(null)
+  const [hScrollWidth, setHScrollWidth] = useState(0)
+  const [showHScroll, setShowHScroll] = useState(false)
+  // Height of the grid's own horizontal scrollbar (0 for overlay scrollbars).
+  const [hBarHeight, setHBarHeight] = useState(0)
+  const measureScroll = useCallback(() => {
+    const grid = gridScrollRef.current
+    if (!grid) {
+      setShowHScroll(false)
+      return
+    }
+    const overflow = grid.scrollWidth - grid.clientWidth
+    const proxyWidth = hScrollRef.current?.clientWidth || grid.clientWidth
+    setHScrollWidth(proxyWidth + Math.max(0, overflow))
+    setShowHScroll(overflow > 0)
+    // The box has no border, so what's left of offsetHeight is the scrollbar.
+    setHBarHeight(overflow > 0 ? Math.max(0, grid.offsetHeight - grid.clientHeight) : 0)
+  }, [])
+  useEffect(() => {
+    measureScroll()
+    window.addEventListener('resize', measureScroll)
+    const ro = new ResizeObserver(measureScroll)
+    if (gridEl) {
+      ro.observe(gridEl)
+      const table = gridEl.firstElementChild
+      if (table) ro.observe(table)
+    }
+    return () => {
+      window.removeEventListener('resize', measureScroll)
+      ro.disconnect()
+    }
+  }, [gridEl, measureScroll])
+  useEffect(() => {
+    if (showHScroll && hScrollRef.current && gridScrollRef.current) {
+      hScrollRef.current.scrollLeft = gridScrollRef.current.scrollLeft
+    }
+  }, [showHScroll])
   const isDraft = activeVersion?.status === 'draft'
   const editable = canEdit && isDraft
 
@@ -149,12 +209,19 @@ export function ProjectGridPanel({
     [parts],
   )
 
+  // The version whose lines are in `lines`. The lines reach state one render
+  // after the query, so until this matches the version the grid keeps its
+  // skeleton (instead of flashing door groups without their parts).
+  const [linesVersionId, setLinesVersionId] = useState<string | null>(null)
+  const versionId = activeVersion?.id ?? null
   useEffect(() => {
-    if (projectLinesQuery.data && dirtyIdsRef.current.size === 0) {
+    if (!projectLinesQuery.data) return
+    if (dirtyIdsRef.current.size === 0) {
       setLines(projectLinesQuery.data)
       linesRef.current = projectLinesQuery.data
     }
-  }, [projectLinesQuery.data])
+    setLinesVersionId(versionId)
+  }, [projectLinesQuery.data, versionId])
 
   useEffect(() => {
     linesRef.current = lines
@@ -675,7 +742,103 @@ export function ProjectGridPanel({
     )
   }
 
+  // Header values over the grid columns, as in the Excel file (rows 2-4).
+  // Columns: 8 DESCRIPTION, 9 QTY, 10 COST, 11 COST DOOR, 13 PRICE DOOR,
+  // 14 HW PRICE PER DOOR TYPE, 15 OVERALL HW PRICE PER TYPICAL DOOR.
+  const label = (text: string, align: 'right' | 'center' = 'center') => (
+    <div className={`text-[11px] font-bold uppercase text-neutral-600 ${align === 'right' ? 'text-right' : 'text-center'}`}>
+      {text}
+    </div>
+  )
+  const money = (value: number, className = '', testId?: string) => (
+    <div className={`px-1.5 py-0.5 text-right font-mono font-bold text-neutral-950 ${className}`} data-testid={testId}>
+      {formatCurrency(value)}
+    </div>
+  )
+  const summaryCell = (row: number, col: number): ReactNode => {
+    const at = `${row}:${col}`
+    switch (at) {
+      case '0:10':
+        return label('Markup')
+      case '1:10':
+        return (
+          <label
+            htmlFor="grid-markup-input"
+            className="flex items-center justify-end border-2 border-neutral-950 bg-sky-50 px-1.5 py-0.5"
+            aria-label="Markup"
+          >
+            <input
+              id="grid-markup-input"
+              type="text"
+              inputMode="decimal"
+              disabled={!editable}
+              value={markupInput}
+              onChange={(e) => setMarkupInput(e.target.value)}
+              onBlur={async () => {
+                const n = Number(markupInput.replace('%', '').trim())
+                if (Number.isFinite(n) && n >= 0) {
+                  const rounded = Math.round(n * 100) / 100
+                  setMarkupPct(rounded)
+                  setMarkupInput(rounded.toFixed(2))
+                  if (activeVersion && editable) {
+                    setSaveStatus('saving')
+                    const { error } = await supabase
+                      .from('project_versions')
+                      .update({ markup_pct: rounded })
+                      .eq('id', activeVersion.id)
+                    if (error) {
+                      setSaveStatus('error')
+                      setSaveError(error.message)
+                    } else {
+                      setSaveStatus('saved')
+                      await queryClient.invalidateQueries({
+                        queryKey: ['project', activeVersion.project_id],
+                      })
+                    }
+                  }
+                } else {
+                  setMarkupInput(markupPct.toFixed(2))
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.currentTarget.blur()
+                }
+              }}
+              className="w-14 text-right font-mono font-bold text-neutral-950 focus:outline-none disabled:bg-transparent"
+            />
+            <span className="font-mono font-bold text-neutral-700 ml-0.5">%</span>
+          </label>
+        )
+      case '0:11':
+        return label('Total cost')
+      case '1:11':
+        return money(projectTotal, 'bg-orange-100')
+      case '0:13':
+        return label('Total + markup')
+      case '1:13':
+        return money(projectTotalWithMarkup)
+      case '0:15':
+        return label('Total ex. GST')
+      case '1:14':
+        return label('Incl. deliveries / excl. GST', 'right')
+      case '1:15':
+        return money(totalExGst, 'border border-neutral-950 bg-sky-100', 'grid-total-ex-gst')
+      case '2:8':
+        return <div className="text-right text-[11px] font-bold uppercase text-sky-900">Overall door qty:</div>
+      case '2:9':
+        return <div className="text-right font-mono font-bold text-neutral-950" data-testid="grid-overall-door-qty">{totalDoors}</div>
+      case '2:14':
+        return label('Deliveries', 'right')
+      case '2:15':
+        return money(deliveries, 'bg-sky-50')
+      default:
+        return null
+    }
+  }
+
   return (
+    <div>
     <div className="space-y-3">
       {saveError && (
         <div
@@ -697,32 +860,28 @@ export function ProjectGridPanel({
         </div>
       )}
 
-      {groups.length === 0 ? (
+      {/* Skeleton until the groups, their lines, the sheets (lines show per
+          sheet) and the parts (LEGEND / MANUFACTURER) are all in, so the grid
+          appears once, complete. */}
+      {sheetsLoading ||
+      groupsQuery.isLoading ||
+      projectLinesQuery.isLoading ||
+      partsQuery.isLoading ||
+      (versionId !== null && linesVersionId !== versionId && !projectLinesQuery.isError) ? (
+        <GridSkeleton />
+      ) : groups.length === 0 ? (
         <div className="border border-dashed border-neutral-300 bg-neutral-50 p-8 text-center text-xs text-neutral-600">
           No door groups in this version yet.
         </div>
       ) : (
         <div className="border border-neutral-400 bg-white">
-          {/* Excel-style Workbook Title Strip */}
-          <div className="flex flex-wrap items-center justify-between gap-4 px-3 py-2.5 border-b border-neutral-400 bg-white">
-            {/* Same header rows as the Excel export (rows 2-4); the sheet title
-                and schedule # are only chosen when exporting. */}
-            <div className="space-y-0.5">
-              <div className="text-sm font-bold uppercase text-neutral-600">
-                Project: {(projectTitle || projectName).toUpperCase()}
-              </div>
-              <div className="text-sm font-bold uppercase text-neutral-600">
-                Client: {(clientName || '').toUpperCase()}
-              </div>
-              <div className="text-sm font-bold text-neutral-600">Schedule #:</div>
-              <div className="pt-0.5 text-[11px] text-neutral-500">
-                {sheet ? `Sheet: ${sheet.name} • ` : ''}
-                v{activeVersion.version_no} ({activeVersion.status.toUpperCase()})
-                {editable &&
-                  ' • Arrow keys move, Enter/F2 edit, Tab next, Esc cancel'}
-              </div>
+          {/* Sheet / version, other-supplier toggle and save status. */}
+          <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-1.5 border-b border-neutral-400 bg-white">
+            <div className="text-[11px] text-neutral-500">
+              {sheet ? `Sheet: ${sheet.name} • ` : ''}
+              v{activeVersion.version_no} ({activeVersion.status.toUpperCase()})
+              {editable && ' • Arrow keys move, Enter/F2 edit, Tab next, Esc cancel'}
             </div>
-
             <div className="flex items-center gap-4 text-xs">
               {editable && sheetSupplierId && (
                 <label
@@ -761,106 +920,12 @@ export function ProjectGridPanel({
                   )}
                 </Badge>
               )}
+            </div>
+          </div>
 
-              <div className="flex items-center border border-neutral-400">
-                <label
-                  htmlFor="grid-markup-input"
-                  className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400"
-                >
-                  MARKUP:
-                </label>
-                <div className="flex items-center px-1.5 py-0.5 bg-white">
-                  <input
-                    id="grid-markup-input"
-                    type="text"
-                    inputMode="decimal"
-                    disabled={!editable}
-                    value={markupInput}
-                    onChange={(e) => setMarkupInput(e.target.value)}
-                    onBlur={async () => {
-                      const n = Number(markupInput.replace('%', '').trim())
-                      if (Number.isFinite(n) && n >= 0) {
-                        const rounded = Math.round(n * 100) / 100
-                        setMarkupPct(rounded)
-                        setMarkupInput(rounded.toFixed(2))
-                        if (activeVersion && editable) {
-                          setSaveStatus('saving')
-                          const { error } = await supabase
-                            .from('project_versions')
-                            .update({ markup_pct: rounded })
-                            .eq('id', activeVersion.id)
-                          if (error) {
-                            setSaveStatus('error')
-                            setSaveError(error.message)
-                          } else {
-                            setSaveStatus('saved')
-                            await queryClient.invalidateQueries({
-                              queryKey: ['project', activeVersion.project_id],
-                            })
-                          }
-                        }
-                      } else {
-                        setMarkupInput(markupPct.toFixed(2))
-                      }
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.currentTarget.blur()
-                      }
-                    }}
-                    className="w-14 text-right font-mono font-bold text-neutral-950 focus:outline-none disabled:bg-transparent"
-                  />
-                  <span className="font-mono font-bold text-neutral-700 ml-0.5">
-                    %
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center border border-neutral-400">
-                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
-                  OVERALL DOOR QTY:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
-                  {totalDoors}
-                </span>
-              </div>
-
-              <div className="flex items-center border border-neutral-400">
-                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
-                  TOTAL COST:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
-                  {formatCurrency(projectTotal)}
-                </span>
-              </div>
-
-              <div className="flex items-center border border-neutral-400">
-                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
-                  TOTAL + MARKUP:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
-                  {formatCurrency(projectTotalWithMarkup)}
-                </span>
-              </div>
-
-              <div className="flex items-center border border-neutral-400">
-                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
-                  DELIVERIES:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
-                  {formatCurrency(deliveries)}
-                </span>
-              </div>
-
-              <div className="flex items-center border border-neutral-950">
-                <span className="px-2 py-1 bg-sky-100 font-semibold text-neutral-950 border-r border-neutral-950">
-                  TOTAL EX. GST:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950" data-testid="grid-total-ex-gst">
-                  {formatCurrency(totalExGst)}
-                </span>
-              </div>
-
+          {/* The Export button sits in the page's button row (next to Submit). */}
+          {exportSlot &&
+            createPortal(
               <Button
                 type="button"
                 variant="outline"
@@ -873,34 +938,65 @@ export function ProjectGridPanel({
               >
                 <Download className="h-3.5 w-3.5" />
                 <span>{exporting ? 'Exporting...' : 'Export Excel'}</span>
-              </Button>
-            </div>
-          </div>
+              </Button>,
+              exportSlot,
+            )}
 
           {/*
             Single Connected Excel Grid. It scrolls inside a box that fits the
-            screen, so the horizontal scrollbar and the column headers stay in
-            view instead of only at the bottom / top of a long schedule.
+            screen, so the column headers stay in view. It scrolls sideways
+            natively; its own horizontal scrollbar is pulled under the clipping
+            wrapper (negative margin) and the pinned bottom bar shows one instead.
           */}
+          <div className="overflow-hidden">
           <div
+            ref={setGridScroll}
+            onScroll={(e) => {
+              if (hScrollRef.current && showHScroll) hScrollRef.current.scrollLeft = e.currentTarget.scrollLeft
+            }}
+            style={{ marginBottom: -hBarHeight }}
             className="max-h-[max(18rem,calc(100dvh_-_9rem))] overflow-auto"
             data-testid="hardware-grid-scroll"
           >
           <table className="w-auto border-collapse text-xs">
-            <thead className="sticky top-0 z-10 bg-neutral-200 text-neutral-950 shadow-[0_1px_0_0_#a3a3a3]">
+            <thead className="text-neutral-950">
+              {/*
+                The Excel export's rows 2-4, each value over the same column as
+                in the file: markup over COST, door qty over QTY, total ex. GST
+                and deliveries over OVERALL HW PRICE PER TYPICAL DOOR. These
+                scroll away; the column headers below stay pinned.
+              */}
+              {[0, 1, 2].map((row) => (
+                <tr key={`summary-${row}`} className="bg-white" data-testid="grid-summary-row">
+                  <td colSpan={5} className="px-3 py-1 text-sm font-bold uppercase text-neutral-600 whitespace-nowrap">
+                    {row === 0 && <>Project: {(projectTitle || projectName).toUpperCase()}</>}
+                    {row === 1 && <>Client: {(clientName || '').toUpperCase()}</>}
+                    {row === 2 && <span className="normal-case">Schedule #:</span>}
+                  </td>
+                  {GRID_COLUMNS.slice(5).map((c, i) => {
+                    const col = i + 5
+                    return (
+                      <td key={c.label} className="px-2 py-1 whitespace-nowrap">
+                        {summaryCell(row, col)}
+                      </td>
+                    )
+                  })}
+                  {editable && <td />}
+                </tr>
+              ))}
               <tr>
                 {GRID_COLUMNS.map((c) => (
                   <th
                     key={c.label}
-                    className={`border border-neutral-400 px-2 py-1.5 font-bold uppercase tracking-wider whitespace-nowrap ${
+                    className={`sticky top-0 z-10 border border-neutral-400 px-2 py-1.5 font-bold uppercase tracking-wider whitespace-nowrap shadow-[0_1px_0_0_#a3a3a3] ${
                       c.align === 'right' ? 'text-right' : c.align === 'center' ? 'text-center' : 'text-left'
-                    } ${c.label === 'MHQT REMARKS' ? 'bg-yellow-200' : ''}`}
+                    } ${c.label === 'MHQT REMARKS' ? 'bg-yellow-200' : 'bg-neutral-200'}`}
                   >
                     {c.label}
                   </th>
                 ))}
                 {editable && (
-                  <th className="border border-neutral-400 px-2 py-1.5 text-center font-bold uppercase tracking-wider whitespace-nowrap">
+                  <th className="sticky top-0 z-10 border border-neutral-400 bg-neutral-200 px-2 py-1.5 text-center font-bold uppercase tracking-wider whitespace-nowrap shadow-[0_1px_0_0_#a3a3a3]">
                     ACTIONS
                   </th>
                 )}
@@ -941,6 +1037,7 @@ export function ProjectGridPanel({
               })}
             </tbody>
           </table>
+          </div>
           </div>
         </div>
       )}
@@ -988,6 +1085,30 @@ export function ProjectGridPanel({
           }}
         />
       )}
+    </div>
+
+      {/*
+        Pinned to the bottom of the screen while the grid is in view. The
+        negative offset cancels the page area's bottom padding (--page-pad, set
+        in AppShell), since sticky offsets count from it.
+      */}
+      <div
+        className="sticky bottom-[calc(-1*var(--page-pad,0px))] z-20 bg-white"
+        data-testid="grid-bottom-bar"
+      >
+        <div
+          ref={hScrollRef}
+          aria-hidden="true"
+          onScroll={(e) => {
+            if (gridScrollRef.current) gridScrollRef.current.scrollLeft = e.currentTarget.scrollLeft
+          }}
+          className={`overflow-x-auto overflow-y-hidden border-x border-neutral-400 bg-white ${showHScroll ? '' : 'hidden'}`}
+          data-testid="grid-bottom-hscroll"
+        >
+          <div style={{ width: hScrollWidth, height: 1 }} />
+        </div>
+        {footer}
+      </div>
     </div>
   )
 }

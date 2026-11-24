@@ -1,6 +1,7 @@
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { projectDisplayName } from '@/lib/projectName'
+import { PageHeaderSkeleton, TableSkeleton } from '@/components/ui/skeleton'
 import { QuotationImportWizard } from '@/features/projects/QuotationImportWizard'
 import { canReviseFrom } from '@/features/projects/versionActions'
 import { useProjectDetail } from '@/features/projects/useProjectDetail'
@@ -49,7 +50,10 @@ export function ImportQuotationPage() {
 
   if (projectQuery.isLoading || (!isReimport && suppliersQuery.isLoading)) {
     return (
-      <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">Loading...</div>
+      <div className="space-y-6">
+        <PageHeaderSkeleton />
+        <TableSkeleton rows={8} columns={6} label="Loading…" />
+      </div>
     )
   }
   if (projectQuery.isError || !project) return notice('Project not found or failed to load.')

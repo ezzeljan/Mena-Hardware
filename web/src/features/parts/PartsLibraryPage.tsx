@@ -28,6 +28,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { fetchAllRows } from '@/lib/fetchAll'
 import { useAuth } from '@/features/auth/AuthContext'
 import {
@@ -700,9 +701,7 @@ export function PartsLibraryPage() {
 
       {/* Table State */}
       {partsQuery.isLoading ? (
-        <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
-          Loading parts library...
-        </div>
+        <TableSkeleton rows={10} columns={7} label="Loading parts library…" />
       ) : partsQuery.isError ? (
         <div
           role="alert"

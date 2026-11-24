@@ -51,10 +51,7 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
   })
 
   await page.route('**/rest/v1/suppliers**', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify([
+    const list = [
         {
           id: '22222222-2222-2222-2222-222222222222',
           name: 'MM',
@@ -69,7 +66,13 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
           created_at: '2026-11-16T00:00:00Z',
           updated_at: '2026-11-16T00:00:00Z',
         },
-      ]),
+    ]
+    // One supplier by id (maybeSingle) for the supplier products page.
+    const id = new URL(route.request().url()).searchParams.get('id')?.replace(/^eq\./, '')
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(id ? (list.find((s) => s.id === id) ?? null) : list),
     })
   })
 
@@ -90,10 +93,7 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
   })
 
   await page.route('**/rest/v1/parts**', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify([
+    const list = [
         {
           id: '44444444-4444-4444-4444-444444444444',
           sku: '6125SSS',
@@ -128,7 +128,29 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
             is_owner_supplied: true,
           },
         },
-      ]),
+        {
+          id: '88888888-8888-8888-8888-888888888888',
+          sku: '6100SSS',
+          supplier_id: '33333333-3333-3333-3333-333333333333',
+          description: 'NOVAS 6000 SERIES PASSAGE LATCH 60MM BACKSET SSS',
+          unit_cost: 30,
+          active: false,
+          folder_id: null,
+          legend: '',
+          created_at: '2026-11-16T00:00:00Z',
+          updated_at: '2026-11-16T00:00:00Z',
+          suppliers: {
+            id: '33333333-3333-3333-3333-333333333333',
+            name: 'NOVAS',
+            is_owner_supplied: false,
+          },
+        },
+    ]
+    const supplierId = new URL(route.request().url()).searchParams.get('supplier_id')?.replace(/^eq\./, '')
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(supplierId ? list.filter((p) => p.supplier_id === supplierId) : list),
     })
   })
 
@@ -168,4 +190,24 @@ test('log in and open parts library (smoke test)', async ({ page }) => {
   await expect.poll(() => createdFolders.length).toBe(1)
   expect(createdFolders[0]).toMatchObject({ name: 'Hinges', position: 2 })
   await expect(pane.getByRole('button', { name: /Hinges/ })).toBeVisible()
+
+  // 6. Suppliers: clicking a supplier lists only its parts, with filters.
+  await page.getByRole('link', { name: 'Suppliers' }).click()
+  await page.getByRole('row').filter({ hasText: 'NOVAS' }).getByRole('cell').nth(1).click()
+  await expect(page).toHaveURL(/\/suppliers\/33333333-3333-3333-3333-333333333333$/)
+  await expect(page.getByRole('heading', { name: 'NOVAS' })).toBeVisible()
+  await expect(page.getByText('1 active part · 1 inactive')).toBeVisible()
+  await expect(page.getByText('6125SSS')).toBeVisible()
+  await expect(page.getByText('505BC+SLC')).toHaveCount(0)
+  await expect(page.getByText('6100SSS')).toHaveCount(0)
+  await page.getByText('Show inactive parts').click()
+  await expect(page.getByText('6100SSS')).toBeVisible()
+  const folderSelect = page.getByLabel('Filter by folder')
+  await folderSelect.selectOption({ label: 'Unfiled (1)' })
+  await expect(page.getByText('6125SSS')).toHaveCount(0)
+  await expect(page.getByText('6100SSS')).toBeVisible()
+  await folderSelect.selectOption({ label: 'All folders (2)' })
+  await page.getByLabel("Search this supplier's parts").fill('vestibule')
+  await expect(page.getByText('6125SSS')).toBeVisible()
+  await expect(page.getByText('6100SSS')).toHaveCount(0)
 })

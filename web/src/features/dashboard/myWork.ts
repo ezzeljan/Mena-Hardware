@@ -1,10 +1,11 @@
 import type { HardwareQuote, Project, ProjectVersion, UserRole } from '@/types/database'
-import { projectDisplayName } from '@/lib/projectName'
+import { projectBuilder, projectDisplayName } from '@/lib/projectName'
 
 export interface WorkProject extends Pick<
   Project,
   'id' | 'reference_no' | 'name' | 'client' | 'status' | 'assigned_pm' | 'updated_at'
-> {
+>,
+  Partial<Pick<Project, 'stage' | 'awarded_quote_id'>> {
   hardware_quotes?: Pick<HardwareQuote, 'id' | 'builder_name'>[]
   project_versions?: Pick<
     ProjectVersion,
@@ -18,7 +19,8 @@ export interface WorkItem {
   key: string
   projectId: string
   label: string
-  client: string
+  /** The project's builder (awarded quote, else the one entered); '' during tender. */
+  builder: string
   /** Builder and latest version, e.g. "Acme v2 · SUBMITTED"; null for project-level items. */
   versionLabel: string | null
   note: string
@@ -81,7 +83,7 @@ function quoteItem(p: WorkProject, q: QuoteState, note: string): WorkItem {
     key: q.quoteId,
     projectId: p.id,
     label: projectDisplayName(p),
-    client: p.client,
+    builder: projectBuilder(p),
     versionLabel: `${q.builder} v${q.latest.version_no} · ${q.latest.status.replace('_', ' ').toUpperCase()}`,
     note,
     href: `/projects/${p.id}/hardware?quote=${q.quoteId}`,
@@ -95,7 +97,7 @@ function projectItem(p: WorkProject, note: string): WorkItem {
     key: p.id,
     projectId: p.id,
     label: projectDisplayName(p),
-    client: p.client,
+    builder: projectBuilder(p),
     versionLabel: null,
     note,
     href: `/projects/${p.id}`,

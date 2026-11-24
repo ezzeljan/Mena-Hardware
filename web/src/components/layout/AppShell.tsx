@@ -1,11 +1,13 @@
 import { Suspense } from 'react'
-import { Navigate, Outlet } from 'react-router-dom'
+import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '@/features/auth/AuthContext'
+import { PageSkeleton } from '@/components/ui/skeleton'
 import { NotificationBell } from '@/features/notifications/NotificationBell'
 import { Sidebar } from './Sidebar'
 
 export function AppShell() {
   const { session, isAdmin, loading } = useAuth()
+  const { pathname } = useLocation()
 
   if (loading) {
     return (
@@ -25,11 +27,14 @@ export function AppShell() {
   }
 
   return (
-    <div className="min-h-screen flex bg-white text-neutral-950">
+    // Fits the screen: only the page area scrolls, so the header stays put and
+    // sticky parts of a page (like the hardware grid's bottom bar) stick to the screen.
+    // h-dvh: the visible height, also on mobile browsers with toolbars.
+    <div className="h-dvh flex overflow-hidden bg-white text-neutral-950">
       <Sidebar isAdmin={isAdmin} />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
         <header className="h-14 border-b border-neutral-200 bg-white px-6 flex items-center justify-between">
           <div className="text-xs font-medium uppercase tracking-wider text-neutral-500">
             Mena Hardware
@@ -40,12 +45,11 @@ export function AppShell() {
           </div>
         </header>
 
-        <main className="flex-1 p-6 overflow-auto">
+        {/* --page-pad is the padding; sticky page parts offset by it (e.g. the grid's bottom bar). */}
+        <main className="flex-1 min-h-0 overflow-auto p-[var(--page-pad)] [--page-pad:1.5rem]">
           {/* Pages load on first visit (see App.tsx). */}
           <Suspense
-            fallback={
-              <div className="p-10 text-center text-sm text-neutral-600">Loading...</div>
-            }
+            fallback={<PageSkeleton path={pathname} />}
           >
             <Outlet />
           </Suspense>

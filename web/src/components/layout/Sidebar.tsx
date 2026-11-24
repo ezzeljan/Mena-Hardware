@@ -23,7 +23,7 @@ export function Sidebar({ isAdmin }: SidebarProps) {
   ]
 
   return (
-    <aside className="sticky top-0 z-40 flex h-screen w-24 shrink-0 flex-col justify-between border-r border-neutral-200 bg-neutral-50">
+    <aside className="sticky top-0 z-40 flex h-dvh w-24 shrink-0 flex-col justify-between border-r border-neutral-200 bg-neutral-50">
       <div className="flex min-h-0 flex-col items-center">
         <div className="flex h-14 w-full items-center justify-center border-b border-neutral-200">
           <Link

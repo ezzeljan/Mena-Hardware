@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, GitBranch, Lock, MessageSquare, Trophy, Upload } from 'lucide-react'
 import { projectDisplayName } from '@/lib/projectName'
+import { PageHeaderSkeleton, GridSkeleton } from '@/components/ui/skeleton'
 import { ProjectGridPanel } from '@/features/projects/ProjectGridPanel'
 import { SheetTabs } from '@/features/projects/SheetTabs'
 import { VersionsDiffDialog } from '@/features/projects/VersionsDiffDialog'
@@ -29,6 +30,8 @@ export function ProjectHardwarePage() {
   const { projectQuery, project, quotes, canEditContent, canReview } = useProjectDetail(id)
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
+  // The button row element the grid portals its Export Excel button into.
+  const [exportSlot, setExportSlot] = useState<HTMLSpanElement | null>(null)
 
   const [versionsOpen, setVersionsOpen] = useState(false)
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(
@@ -136,8 +139,9 @@ export function ProjectHardwarePage() {
 
   if (projectQuery.isLoading) {
     return (
-      <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
-        Loading hardware quote...
+      <div className="space-y-4">
+        <PageHeaderSkeleton buttons={5} />
+        <GridSkeleton />
       </div>
     )
   }
@@ -295,6 +299,8 @@ export function ProjectHardwarePage() {
               <span>Re-import Quotation</span>
             </Button>
           )}
+          {/* The grid draws its Export Excel button here. */}
+          <span ref={setExportSlot} className="contents" />
           {!locked && (
             // Version status note + Submit / Approve / Request Changes / New Draft.
             <ApprovalBar
@@ -327,26 +333,32 @@ export function ProjectHardwarePage() {
           activeVersion={activeVersion}
           sheet={currentSheet}
           sheets={sheets}
+          // The grid shows only the current sheet's lines: keep its skeleton until the sheets are in.
+          sheetsLoading={sheetsQuery.isLoading}
           canEdit={canEditQuote}
           commentCounts={commentCounts}
           onOpenComments={(groupId) => openComments(groupId)}
           highlightGroupId={highlightGroupId}
           onRegisterSavePending={registerSavePending}
+          exportSlot={exportSlot}
+          // The sheet tabs sit in the grid's bar pinned to the bottom of the screen.
+          footer={
+            activeVersion && sheets.length > 0 ? (
+              <SheetTabs
+                versionId={activeVersion.id}
+                sheets={sheets}
+                activeSheetId={currentSheet?.id ?? null}
+                onSelect={(sheetId) => {
+                  const s = sheets.find((x) => x.id === sheetId)
+                  setActiveSheet({ id: sheetId, supplierId: s?.supplier_id ?? '' })
+                }}
+                editable={canEditQuote && activeVersion.status === 'draft'}
+                commentCounts={commentCountsBySheet}
+                savePendingEdits={savePendingEdits}
+              />
+            ) : null
+          }
         />
-        {activeVersion && sheets.length > 0 && (
-          <SheetTabs
-            versionId={activeVersion.id}
-            sheets={sheets}
-            activeSheetId={currentSheet?.id ?? null}
-            onSelect={(sheetId) => {
-              const s = sheets.find((x) => x.id === sheetId)
-              setActiveSheet({ id: sheetId, supplierId: s?.supplier_id ?? '' })
-            }}
-            editable={canEditQuote && activeVersion.status === 'draft'}
-            commentCounts={commentCountsBySheet}
-            savePendingEdits={savePendingEdits}
-          />
-        )}
       </div>
 
       <VersionCommentsDrawer

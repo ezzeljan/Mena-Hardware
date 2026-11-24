@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Building2, Pencil, Plus } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/features/auth/AuthContext'
 import {
   supplierSchema,
@@ -34,6 +36,7 @@ import {
 export function SuppliersPage() {
   const { isAdmin } = useAuth()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingMfg, setEditingMfg] = useState<Supplier | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
@@ -129,9 +132,7 @@ export function SuppliersPage() {
       </div>
 
       {suppliersQuery.isLoading ? (
-        <div className="border border-neutral-200 p-8 text-center text-sm text-neutral-600">
-          Loading suppliers...
-        </div>
+        <TableSkeleton rows={6} columns={4} label="Loading suppliers…" />
       ) : suppliersQuery.isError ? (
         <div
           role="alert"
@@ -155,9 +156,19 @@ export function SuppliersPage() {
           </TableHeader>
           <TableBody>
             {suppliersQuery.data?.map((mfg) => (
-              <TableRow key={mfg.id}>
+              <TableRow
+                key={mfg.id}
+                className="cursor-pointer hover:bg-neutral-50"
+                onClick={() => navigate(`/suppliers/${mfg.id}`)}
+              >
                 <TableCell className="font-semibold tracking-tight">
-                  {mfg.name}
+                  <Link
+                    to={`/suppliers/${mfg.id}`}
+                    className="hover:underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {mfg.name}
+                  </Link>
                 </TableCell>
                 <TableCell>
                   {mfg.is_owner_supplied ? (
@@ -176,7 +187,10 @@ export function SuppliersPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => openEditDialog(mfg)}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        openEditDialog(mfg)
+                      }}
                     >
                       <Pencil className="h-3.5 w-3.5" />
                       <span>Edit</span>

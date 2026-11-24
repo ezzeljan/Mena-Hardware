@@ -134,12 +134,16 @@ export function CreateProjectForm({ pmProfiles, onCancel }: CreateProjectFormPro
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="new-project-client">Client</Label>
+            {/* Optional: at tender the quotes come from competing builders; the
+                builder is known once a quote is awarded. */}
+            <Label htmlFor="new-project-client">
+              Builder <span className="font-normal text-neutral-500">(optional)</span>
+            </Label>
             <Input
               id="new-project-client"
               value={client}
               onChange={(e) => setClient(e.target.value)}
-              placeholder="e.g. DECODE"
+              placeholder="Leave blank during tender"
             />
           </div>
 

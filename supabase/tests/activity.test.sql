@@ -75,7 +75,7 @@ begin
   end if;
   select * into v_row from public.project_activity where project_id = v_project and action = 'details_changed';
   if v_row.actor_id <> v_pm or jsonb_array_length(v_row.details->'changes') <> 2
-     or v_row.details->'changes'->0->>'label' <> 'Client'
+     or v_row.details->'changes'->0->>'label' <> 'Builder'
      or v_row.details->'changes'->0->>'from' <> 'Acme'
      or v_row.details->'changes'->0->>'to' <> 'Acme Holdings' then
     raise exception 'TEST FAILED: Detail edits were not logged with from/to values (got %)', v_row.details;

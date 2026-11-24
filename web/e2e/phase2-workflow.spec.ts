@@ -697,7 +697,7 @@ async function createProjectViaForm(page: Page) {
 
   await page.getByLabel('Reference No.').fill('SV999')
   await page.getByLabel('Project Name *').fill('E2E Test Tower')
-  await page.getByLabel('Client').fill('Mena Builders')
+  await page.getByLabel('Builder').fill('Mena Builders')
   await page.getByLabel('Site').fill('Sydney CBD')
   // Details only: the form must not ask for a quotation file.
   await expect(page.locator('input[type="file"]')).toHaveCount(0)
@@ -1308,7 +1308,7 @@ test('Hardware grid: NOVAS Template columns and editable MHQT remarks', async ({
   await page.goto(`/projects/${PROJECT_ID}/hardware`)
 
   for (const header of [
-    'LEGEND', 'SUPPLIER', 'COST DOOR', 'PRICE DOOR', 'HW PRICE PER DOOR TYPE',
+    'LEGEND', 'MANUFACTURER', 'COST DOOR', 'PRICE DOOR', 'HW PRICE PER DOOR TYPE',
     'OVERALL HW PRICE PER TYPICAL DOOR', 'TOTAL ITEMS PER TYPICAL DOOR', 'MHQT REMARKS',
   ]) {
     await expect(page.getByRole('columnheader', { name: header, exact: true })).toBeVisible()
@@ -1330,6 +1330,47 @@ test('Hardware grid: NOVAS Template columns and editable MHQT remarks', async ({
   await page.keyboard.press('Enter')
   await expect.poll(() => state.lines.find((l) => l.id === 'pline-c-1')?.mhqt_remarks).toBe('Supply only')
   await expect(hingeRow).toContainText('Supply only')
+})
+
+test('Hardware grid: horizontal scrollbar and sheet tabs pinned to the bottom of the screen', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 420 })
+  await mockSupabase(page, 'estimator', COMMENT_SEED('draft'))
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/hardware`)
+  await expect(page.getByRole('columnheader', { name: 'MHQT REMARKS' })).toBeAttached()
+
+  // At the top of the page the grid runs below the screen: the bar is pinned
+  // to the bottom and carries a scrollbar that moves the grid sideways.
+  const bar = page.getByTestId('grid-bottom-bar')
+  await expect(bar.getByTestId('sheet-tabs')).toBeVisible()
+  const box = await bar.boundingBox()
+  expect(Math.round(box!.y + box!.height)).toBeLessThanOrEqual(420)
+  const hscroll = page.getByTestId('grid-bottom-hscroll')
+  await expect(hscroll).toBeVisible()
+  // (The e2e tsconfig has no DOM types, so the page code goes in as strings.)
+  await page.evaluate(`document.querySelector('[data-testid=grid-bottom-hscroll]').scrollLeft = 300`)
+  await expect
+    .poll(() => page.evaluate(`document.querySelector('[data-testid=hardware-grid-scroll]').scrollLeft`))
+    .toBeGreaterThan(0)
+
+  // Shift + wheel over the grid scrolls it sideways too (its own scrollbar is hidden).
+  await page.evaluate(`document.querySelector('[data-testid=hardware-grid-scroll]').scrollLeft = 0`)
+  await page.getByTestId('hardware-grid-scroll').hover()
+  await page.keyboard.down('Shift')
+  await page.mouse.wheel(0, 200)
+  await page.keyboard.up('Shift')
+  await expect
+    .poll(() => page.evaluate(`document.querySelector('[data-testid=grid-bottom-hscroll]').scrollLeft`))
+    .toBeGreaterThan(0)
+
+  // Scrolled to the end, the same scrollbar sits right under the grid: there's
+  // only ever one, so nothing to hand over.
+  await page.evaluate(`(() => { const m = document.querySelector('main'); m.scrollTo(0, m.scrollHeight) })()`)
+  await expect(hscroll).toBeVisible()
+  const gap = await page.evaluate(
+    `document.querySelector('[data-testid=grid-bottom-bar]').getBoundingClientRect().top - document.querySelector('[data-testid=hardware-grid-scroll]').getBoundingClientRect().bottom`,
+  )
+  expect(Math.abs(Number(gap))).toBeLessThanOrEqual(2)
 })
 
 test('Supplier sheets: add a sheet, flag other-supplier parts, rename, export both', async ({ page }) => {
@@ -1588,4 +1629,35 @@ test('Estimator deletes a builder quote (not while it waits for PM review)', asy
   await expect(dialog).toHaveCount(0)
   await expect(quotes.getByTestId('hardware-quote-row')).toHaveCount(1)
   await expect(quotes).not.toContainText('Bolt Construct')
+})
+
+test('Hardware grid: stays a skeleton until the lines are in (no door groups without parts)', async ({ page }) => {
+  await mockSupabase(page, 'estimator', COMMENT_SEED('draft'))
+  await signIn(page, 'estimator')
+  // Lines, then the supplier sheets (lines show per sheet), arrive well after the door groups.
+  await page.route('**/rest/v1/project_lines**', async (route) => {
+    if (route.request().method() === 'GET') await new Promise((r) => setTimeout(r, 1000))
+    await route.fallback()
+  })
+  await page.route('**/rest/v1/quote_sheets**', async (route) => {
+    if (route.request().method() === 'GET') await new Promise((r) => setTimeout(r, 2000))
+    await route.fallback()
+  })
+  // Count frames where the LOBBY group row is drawn without its MMHINGE line.
+  // (A string: the e2e tsconfig has no DOM types.)
+  await page.addInitScript({
+    content: `
+      window.flash = 0
+      const check = () => {
+        const t = document.body ? document.body.innerText : ''
+        if (t.includes('DR-001') && !t.includes('MMHINGE')) window.flash++
+        requestAnimationFrame(check)
+      }
+      requestAnimationFrame(check)
+    `,
+  })
+  await page.goto(`/projects/${PROJECT_ID}/hardware`)
+  await expect(page.getByText('Loading the hardware grid…')).toBeAttached()
+  await expect(page.getByText('MMHINGE')).toBeVisible({ timeout: 10000 })
+  expect(await page.evaluate('window.flash')).toBe(0)
 })

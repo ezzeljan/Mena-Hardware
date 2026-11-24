@@ -15,7 +15,8 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
-import { projectDisplayName } from '@/lib/projectName'
+import { PageHeaderSkeleton, Skeleton, ListSkeleton } from '@/components/ui/skeleton'
+import { projectBuilder, projectDisplayName } from '@/lib/projectName'
 import { projectFormSchema, type ProjectFormValues } from '@/lib/schemas'
 import type { Profile } from '@/types/database'
 import { ProjectActivityPanel } from '@/features/projects/ProjectActivityPanel'
@@ -164,8 +165,17 @@ export function ProjectDetailPage() {
 
   if (projectQuery.isLoading) {
     return (
-      <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
-        Loading project...
+      <div className="space-y-6">
+        <PageHeaderSkeleton buttons={3} />
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-3 xl:grid-cols-5" aria-hidden="true">
+          {Array.from({ length: 5 }, (_, i) => (
+            <div key={i} className="space-y-2">
+              <Skeleton className="h-2.5 w-16" />
+              <Skeleton className="h-3.5 w-32" />
+            </div>
+          ))}
+        </div>
+        <ListSkeleton rows={3} label="Loading project…" />
       </div>
     )
   }
@@ -261,7 +271,8 @@ export function ProjectDetailPage() {
         </div>
         {/* One row on wide screens; wraps into 3 or 2 columns on smaller ones */}
         <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 xl:grid-cols-5">
-          <DetailField label="Client" icon={Building2}>{project.client || '—'}</DetailField>
+          {/* The awarded quote's builder; during tender only the optional one entered. */}
+          <DetailField label="Builder" icon={Building2}>{projectBuilder(project) || '—'}</DetailField>
           <DetailField label="Site" icon={MapPin}>{project.site || '—'}</DetailField>
           {/* The PM and admins award the project here (choose the winning quote). */}
           <DetailField label="Stage" icon={Flag}>
@@ -379,8 +390,26 @@ export function ProjectDetailPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <Label htmlFor="edit-project-client">Client</Label>
-                <Input id="edit-project-client" {...form.register('client')} />
+                {project.stage === 'awarded' ? (
+                  // Once awarded, the builder is the winning quote's: shown, not edited
+                  // (the saved value is kept as it is).
+                  <>
+                    <Label htmlFor="edit-project-client">Builder</Label>
+                    <Input id="edit-project-client" value={projectBuilder(project)} readOnly disabled />
+                    <p className="text-xs text-neutral-500">From the awarded quote.</p>
+                  </>
+                ) : (
+                  <>
+                    <Label htmlFor="edit-project-client">
+                      Builder <span className="font-normal text-neutral-500">(optional)</span>
+                    </Label>
+                    <Input
+                      id="edit-project-client"
+                      placeholder="Set from the awarded quote"
+                      {...form.register('client')}
+                    />
+                  </>
+                )}
               </div>
 
               <div className="space-y-1.5">

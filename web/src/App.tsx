@@ -18,6 +18,11 @@ const SuppliersPage = lazy(() =>
     default: m.SuppliersPage,
   })),
 )
+const SupplierProductsPage = lazy(() =>
+  import('@/features/suppliers/SupplierProductsPage').then((m) => ({
+    default: m.SupplierProductsPage,
+  })),
+)
 const StandardSetsPage = lazy(() =>
   import('@/features/standard-sets/StandardSetsPage').then((m) => ({
     default: m.StandardSetsPage,
@@ -79,6 +84,7 @@ export default function App() {
               <Route path="/projects/:id/import" element={<ImportQuotationPage />} />
               <Route path="/parts" element={<PartsLibraryPage />} />
               <Route path="/suppliers" element={<SuppliersPage />} />
+              <Route path="/suppliers/:id" element={<SupplierProductsPage />} />
               <Route path="/manufacturers" element={<Navigate to="/suppliers" replace />} />
               <Route path="/standard-sets" element={<StandardSetsPage />} />
               <Route

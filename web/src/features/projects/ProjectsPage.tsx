@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, FolderKanban, Plus, Search, Trash2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/features/auth/AuthContext'
 import type { HardwareQuote, Profile, Project, ProjectStage, ProjectVersion } from '@/types/database'
 import { StageBadge, StageSelect } from '@/features/projects/ProjectStage'
@@ -19,7 +20,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { projectDisplayName } from '@/lib/projectName'
+import { projectBuilder, projectDisplayName } from '@/lib/projectName'
 import { useProfileDirectory } from '@/features/account/useProfileDirectory'
 import { AvatarStack } from '@/components/avatar/UserAvatar'
 import {
@@ -103,7 +104,7 @@ export function ProjectsPage() {
       return (
         p.reference_no.toLowerCase().includes(q) ||
         p.name.toLowerCase().includes(q) ||
-        p.client.toLowerCase().includes(q) ||
+        projectBuilder(p).toLowerCase().includes(q) ||
         p.site.toLowerCase().includes(q)
       )
     })
@@ -178,7 +179,7 @@ export function ProjectsPage() {
             <Search className="h-4 w-4 absolute left-3 top-2.5 text-neutral-400" />
             <Input
               aria-label="Search projects"
-              placeholder="Search Ref No., project name, client, or site..."
+              placeholder="Search Ref No., project name, builder, or site..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9 bg-white"
@@ -217,9 +218,7 @@ export function ProjectsPage() {
 
       {/* Table */}
       {projectsQuery.isLoading ? (
-        <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
-          Loading projects...
-        </div>
+        <TableSkeleton rows={8} columns={7} label="Loading projects…" />
       ) : projectsQuery.isError ? (
         <div
           role="alert"
@@ -242,7 +241,7 @@ export function ProjectsPage() {
             <TableRow>
               <TableHead>Ref No.</TableHead>
               <TableHead>Project Name</TableHead>
-              <TableHead>Client</TableHead>
+              <TableHead>Builder</TableHead>
               <TableHead>Site</TableHead>
               <TableHead>Stage</TableHead>
               <TableHead>Team</TableHead>
@@ -269,7 +268,7 @@ export function ProjectsPage() {
                     </Link>
                   </TableCell>
                   <TableCell className="text-sm text-neutral-700">
-                    {project.client || '—'}
+                    {projectBuilder(project) || '—'}
                   </TableCell>
                   <TableCell className="text-sm text-neutral-700">
                     {project.site || '—'}

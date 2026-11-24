@@ -20,6 +20,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { ListSkeleton } from '@/components/ui/skeleton'
 import type { ActivityCategory, ProjectActivity } from '@/types/database'
 import { useProfileDirectory } from '@/features/account/useProfileDirectory'
 import { UserAvatar } from '@/components/avatar/UserAvatar'
@@ -359,7 +360,7 @@ export function ProjectActivityPanel({ projectId, className = '' }: ProjectActiv
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {activityQuery.isLoading ? (
-          <p className="py-6 text-center text-xs text-neutral-500">Loading activity...</p>
+          <ListSkeleton rows={4} label="Loading activity…" className="border-0" />
         ) : activityQuery.isError ? (
           <p className="py-6 text-center text-xs text-red-700">Could not load the activity.</p>
         ) : entries.length === 0 ? (
