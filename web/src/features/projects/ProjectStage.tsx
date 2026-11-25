@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import type { ProjectStage } from '@/types/database'
+import { AwardProjectDialog, type AwardChoice } from '@/features/projects/AwardProjectDialog'
 
 export const PROJECT_STAGES: { value: ProjectStage; label: string }[] = [
   { value: 'tender', label: 'Tender' },
@@ -38,14 +39,30 @@ export function StageBadge({ stage }: { stage: ProjectStage }) {
   )
 }
 
-/** Change a project's stage; refreshes the project, the list and the activity. */
+/**
+ * Change a project's stage; refreshes the project, the list and the activity.
+ * Awarding needs the winning quote and supplier (migration 021); back to
+ * Tender clears them.
+ */
 export function useUpdateProjectStage() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async ({ projectId, stage }: { projectId: string; stage: ProjectStage }) => {
+    mutationFn: async ({
+      projectId,
+      stage,
+      award,
+    }: {
+      projectId: string
+      stage: ProjectStage
+      award?: AwardChoice
+    }) => {
       const { data, error } = await supabase
         .from('projects')
-        .update({ stage })
+        .update(
+          stage === 'awarded' && award
+            ? { stage, awarded_quote_id: award.quoteId, awarded_supplier_id: award.supplierId }
+            : { stage },
+        )
         .eq('id', projectId)
         .select('id')
       if (error) throw error
@@ -56,6 +73,7 @@ export function useUpdateProjectStage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['projects'] }),
         queryClient.invalidateQueries({ queryKey: ['project', projectId] }),
+        queryClient.invalidateQueries({ queryKey: ['award-candidates', projectId] }),
       ])
     },
   })
@@ -77,6 +95,7 @@ export function StageSelect({ projectId, stage, label = 'Project stage' }: Stage
   const mutation = useUpdateProjectStage()
   const shown = mutation.isPending && mutation.variables ? mutation.variables.stage : stage
   const [open, setOpen] = useState(false)
+  const [awardOpen, setAwardOpen] = useState(false)
   const [active, setActive] = useState(0)
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
@@ -98,7 +117,14 @@ export function StageSelect({ projectId, stage, label = 'Project stage' }: Stage
 
   const choose = (value: ProjectStage) => {
     close()
-    if (value !== stage) mutation.mutate({ projectId, stage: value })
+    if (value === stage) return
+    if (value === 'awarded') {
+      // Pick the winning quote and supplier first.
+      mutation.reset()
+      setAwardOpen(true)
+    } else {
+      mutation.mutate({ projectId, stage: value })
+    }
   }
 
   // Close on outside click, scroll or resize (the menu is fixed-positioned).
@@ -197,11 +223,25 @@ export function StageSelect({ projectId, stage, label = 'Project stage' }: Stage
           document.body,
         )}
 
-      {mutation.isError && (
+      {mutation.isError && !awardOpen && (
         <span role="alert" className="text-[10px] font-medium text-red-700">
           {(mutation.error as Error).message}
         </span>
       )}
+
+      <AwardProjectDialog
+        open={awardOpen}
+        onOpenChange={setAwardOpen}
+        projectId={projectId}
+        pending={mutation.isPending}
+        error={mutation.isError ? (mutation.error as Error).message : null}
+        onConfirm={(award) =>
+          mutation.mutate(
+            { projectId, stage: 'awarded', award },
+            { onSuccess: () => setAwardOpen(false) },
+          )
+        }
+      />
     </span>
   )
 }

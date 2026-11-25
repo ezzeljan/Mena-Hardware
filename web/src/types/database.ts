@@ -12,7 +12,7 @@ export interface Profile {
   created_at: string
 }
 
-export interface Manufacturer {
+export interface Supplier {
   id: string
   name: string
   is_owner_supplied: boolean
@@ -20,16 +20,29 @@ export interface Manufacturer {
   updated_at: string
 }
 
+/** A family of hardware in the Parts library, holding parts from every supplier (migration 022). */
+export interface PartFolder {
+  id: string
+  name: string
+  position: number
+  created_at: string
+  updated_at: string
+}
+
 export interface Part {
   id: string
   sku: string
-  manufacturer_id: string
+  supplier_id: string
   description: string
   unit_cost: number | null
   active: boolean
+  /** Folder (migration 022); null = unfiled. */
+  folder_id?: string | null
+  /** Legend code from the quotes, e.g. "F7" (migration 022); '' when none. */
+  legend?: string
   created_at: string
   updated_at: string
-  manufacturers?: Pick<Manufacturer, 'id' | 'name' | 'is_owner_supplied'> | null
+  suppliers?: Pick<Supplier, 'id' | 'name' | 'is_owner_supplied'> | null
 }
 
 export interface PartPriceHistory {
@@ -99,6 +112,9 @@ export interface Project {
   status: ProjectStatus
   /** Tender (default) or Awarded; changed by the assigned PM or an admin. */
   stage: ProjectStage
+  /** Winning quote and supplier once Awarded (migration 021); null at Tender. */
+  awarded_quote_id: string | null
+  awarded_supplier_id: string | null
   created_by: string
   assigned_pm: string | null
   created_at: string
@@ -128,9 +144,32 @@ export interface QuotationDoor {
   created_at: string
 }
 
+/** A builder's hardware quote in a project (migration 021). */
+export interface HardwareQuote {
+  id: string
+  project_id: string
+  builder_name: string
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** A supplier sheet of a quote version; each has its own hardware lines (migration 021). */
+export interface QuoteSheet {
+  id: string
+  version_id: string
+  supplier_id: string
+  name: string
+  position: number
+  created_at: string
+  updated_at: string
+}
+
 export interface ProjectVersion {
   id: string
   project_id: string
+  /** The builder quote this version belongs to; version_no counts per quote. */
+  quote_id: string
   version_no: number
   status: VersionStatus
   upload_id: string | null
@@ -157,13 +196,24 @@ export interface DoorGroup {
   match_score: number | null
   match_reason: string
   pm_remarks: string
+  /** Groups this one was merged from (migration 026); empty when not merged. */
+  merged_from?: MergedFromPart[]
   created_at: string
   updated_at: string
+}
+
+export interface MergedFromPart {
+  group_key: string
+  room_name: string
+  door_qty: number
+  door_tag?: string
 }
 
 export interface ProjectLine {
   id: string
   group_id: string
+  /** The supplier sheet the line is on (migration 021). */
+  sheet_id: string
   position: number
   sku: string
   description: string
@@ -173,6 +223,8 @@ export interface ProjectLine {
   part_id: string | null
   /** "MHQT REMARKS" column (migration 019); '' when empty. */
   mhqt_remarks?: string
+  /** Why the estimator should check this line ('' when nothing to check; migration 024). */
+  review_flag?: string
   created_at: string
   updated_at: string
 }
@@ -199,12 +251,14 @@ export interface AppNotification {
   created_at: string
 }
 
-/** PM comment on a hardware schedule version (migration 018). */
+/** PM comment on a hardware quote version (migration 018). */
 export interface VersionComment {
   id: string
   version_id: string
-  /** The door group it is about, or null for the whole schedule. */
+  /** The door group it is about, or null for the whole quote. */
   door_group_id: string | null
+  /** The supplier sheet it is about, or null (migration 021). */
+  sheet_id: string | null
   author_id: string | null
   body: string
   created_at: string

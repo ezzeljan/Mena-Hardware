@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, CheckCircle2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { ListSkeleton } from '@/components/ui/skeleton'
 import { fetchAllRows } from '@/lib/fetchAll'
 import { useAuth } from '@/features/auth/AuthContext'
 import { buildMyWork, type WorkProject, type WorkSection } from '@/features/dashboard/myWork'
@@ -34,7 +35,7 @@ function SectionCard({
       ) : (
         <ul className="divide-y divide-neutral-100">
           {section.items.map((it) => (
-            <li key={it.projectId}>
+            <li key={it.key}>
               <Link
                 to={it.href}
                 className="flex items-center justify-between gap-3 px-4 py-2.5 hover:bg-neutral-50"
@@ -42,8 +43,7 @@ function SectionCard({
                 <div className="min-w-0">
                   <div className="text-sm font-semibold text-neutral-950 truncate">{it.label}</div>
                   <div className="text-xs text-neutral-600 truncate">
-                    {it.client || '—'}
-                    {' · '}
+                    {it.builder && `${it.builder} · `}
                     Updated{' '}
                     {new Date(it.updatedAt).toLocaleDateString(undefined, {
                       day: 'numeric',
@@ -91,7 +91,7 @@ export function DashboardPage() {
         supabase
           .from('projects')
           .select(
-            'id, reference_no, name, client, status, assigned_pm, updated_at, project_versions(id, version_no, status, upload_id, updated_at), project_estimators(estimator_id)',
+            'id, reference_no, name, client, status, stage, awarded_quote_id, assigned_pm, updated_at, hardware_quotes!hardware_quotes_project_id_fkey(id, builder_name), project_versions(id, quote_id, version_no, status, upload_id, updated_at), project_estimators(estimator_id)',
           )
           .order('id', { ascending: true })
           .range(from, to),
@@ -122,8 +122,9 @@ export function DashboardPage() {
       </div>
 
       {projectsQuery.isLoading ? (
-        <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
-          Loading your work...
+        <div className="grid gap-4 lg:grid-cols-2">
+          <ListSkeleton rows={3} label="Loading your work…" />
+          <ListSkeleton rows={3} label="Loading your work…" />
         </div>
       ) : projectsQuery.isError ? (
         <div role="alert" className="border border-neutral-950 bg-neutral-50 p-4 text-sm text-neutral-950">

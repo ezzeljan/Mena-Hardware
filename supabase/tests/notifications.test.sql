@@ -12,6 +12,7 @@ begin;
 
 do $$
 declare
+  v_supplier uuid;
   v_admin uuid := '00000000-0000-0000-0000-000000000031';
   v_pm uuid := '00000000-0000-0000-0000-000000000032';
   v_est uuid := '00000000-0000-0000-0000-000000000033';
@@ -33,6 +34,8 @@ begin
   update public.profiles set role = 'admin' where id = v_admin;
   update public.profiles set role = 'pm' where id = v_pm;
   update public.profiles set role = 'estimator' where id in (v_est, v_other);
+
+  insert into public.suppliers (name) values ('T SUPPLIER notifications') returning id into v_supplier;
 
   execute 'set local role authenticated';
 
@@ -58,7 +61,7 @@ begin
   end if;
 
   -- 2a. Estimator imports and submits -> PM notified.
-  v_version := public.import_quotation(v_project, v_project::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
+  v_version := public.import_quotation(v_project, 'Builder A', v_supplier, v_project::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
   perform public.transition_version(v_version, 'submit', 'Ready');
 
   select count(*) into v_count from public.notifications where user_id = v_est;
@@ -123,7 +126,7 @@ begin
   insert into public.project_estimators (project_id, estimator_id, assigned_by) values (v_project2, v_other, v_admin);
 
   perform set_config('request.jwt.claims', json_build_object('sub', v_other, 'role', 'authenticated')::text, true);
-  v_version2 := public.import_quotation(v_project2, v_project2::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
+  v_version2 := public.import_quotation(v_project2, 'Builder A', v_supplier, v_project2::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
   perform public.transition_version(v_version2, 'submit', '');
 
   perform set_config('request.jwt.claims', json_build_object('sub', v_admin, 'role', 'authenticated')::text, true);

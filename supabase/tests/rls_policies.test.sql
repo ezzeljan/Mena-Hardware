@@ -57,12 +57,12 @@ begin
   end if;
 
   -- Admin can insert manufacturer
-  insert into public.manufacturers (name, is_owner_supplied)
+  insert into public.suppliers (name, is_owner_supplied)
   values ('TEST_MFG_RLS', false)
   returning id into v_mfg_id;
 
   -- Admin can insert part with NULL unit_cost
-  insert into public.parts (sku, manufacturer_id, description, unit_cost, active)
+  insert into public.parts (sku, supplier_id, description, unit_cost, active)
   values ('TEST-SKU-RLS', v_mfg_id, 'NOVAS TEST PART', null, true)
   returning id into v_part_id;
 
@@ -178,7 +178,7 @@ begin
       end if;
 
       -- Can SELECT manufacturers, parts, standard_sets, standard_set_lines
-      select count(*) into v_updated from public.manufacturers where id = v_mfg_id;
+      select count(*) into v_updated from public.suppliers where id = v_mfg_id;
       if v_updated <> 1 then
         raise exception 'TEST FAILED: % could not read manufacturers', v_label;
       end if;
@@ -201,7 +201,7 @@ begin
       -- Cannot INSERT, UPDATE, or DELETE manufacturer
       v_err := false;
       begin
-        insert into public.manufacturers (name) values ('UNAUTHORIZED_' || v_label);
+        insert into public.suppliers (name) values ('UNAUTHORIZED_' || v_label);
       exception when insufficient_privilege then
         v_err := true;
       end;
@@ -209,13 +209,13 @@ begin
         raise exception 'TEST FAILED: % was able to INSERT into manufacturers!', v_label;
       end if;
 
-      update public.manufacturers set name = 'HACKED' where id = v_mfg_id;
+      update public.suppliers set name = 'HACKED' where id = v_mfg_id;
       get diagnostics v_updated = row_count;
       if v_updated > 0 then
         raise exception 'TEST FAILED: % was able to UPDATE manufacturers!', v_label;
       end if;
 
-      delete from public.manufacturers where id = v_mfg_id;
+      delete from public.suppliers where id = v_mfg_id;
       get diagnostics v_updated = row_count;
       if v_updated > 0 then
         raise exception 'TEST FAILED: % was able to DELETE manufacturers!', v_label;

@@ -1,7 +1,8 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, MessageSquare, Plus, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Flag, MessageSquare, Plus, Trash2, Split } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import type { DoorGroup, ProjectLine } from '@/types/database'
+import { groupKeyHardware } from '@/features/projects/groupKey'
 import { Button } from '@/components/ui/button'
 
 /** Editable grid columns: 0 sku, 1 description, 2 qty_per_door, 3 unit cost, 4 MHQT remarks. */
@@ -32,10 +33,14 @@ export const GRID_COLUMNS: { label: string; align?: 'right' | 'center' }[] = [
   { label: 'MHQT REMARKS' },
 ]
 
-/** Manufacturer of a line, from its Parts Library part. */
-export interface LineManufacturer {
+/** Supplier of a line, from its Parts Library part. */
+export interface LineSupplier {
   name: string
   ownerSupplied: boolean
+  /** LEGEND column: the part's legend, else "MM" for owner-supplied parts. */
+  legend: string
+  /** The part is from another supplier than the sheet's. */
+  other: boolean
 }
 
 /** One door group in the hardware grid: its header row and its line rows. */
@@ -45,7 +50,7 @@ interface GroupRowsFragmentProps {
   groupLines: ProjectLine[]
   markupFactor: number
   editable: boolean
-  manufacturerOf: (line: ProjectLine) => LineManufacturer | null
+  supplierOf: (line: ProjectLine) => LineSupplier | null
   /** PM comments on this door group. */
   commentCount: number
   onOpenComments?: () => void
@@ -59,7 +64,14 @@ interface GroupRowsFragmentProps {
   ) => ReactNode
   onAddLine: () => void
   onDeleteLine: (line: ProjectLine) => void
+  /** Clears a line's review flag (the estimator has checked it). */
+  onClearFlag?: (line: ProjectLine) => void
   onMoveLine: (line: ProjectLine, dir: -1 | 1) => void
+  /** Ticked to merge with other groups (editable drafts only). */
+  selected?: boolean
+  onToggleSelect?: () => void
+  /** The group was merged: split it back into the groups it was made from. */
+  onUnmerge?: () => void
 }
 
 const CELL = 'border border-neutral-300 px-2 py-0.5'
@@ -72,7 +84,7 @@ export function GroupRowsFragment({
   groupLines,
   markupFactor,
   editable,
-  manufacturerOf,
+  supplierOf,
   commentCount,
   onOpenComments,
   highlighted = false,
@@ -80,6 +92,10 @@ export function GroupRowsFragment({
   onAddLine,
   onDeleteLine,
   onMoveLine,
+  onClearFlag,
+  selected = false,
+  onToggleSelect,
+  onUnmerge,
 }: GroupRowsFragmentProps) {
   const rowRef = useRef<HTMLTableRowElement | null>(null)
 
@@ -101,14 +117,35 @@ export function GroupRowsFragment({
       {/* Door Group Header Row (matches Excel DOOR HARDWARE SET sheet) */}
       <tr
         ref={rowRef}
-        className={`font-semibold text-neutral-950 transition-colors ${
-          highlighted ? 'bg-amber-100' : 'bg-neutral-100'
-        }`}
+        className={`font-semibold text-neutral-950 transition-colors ${highlighted ? 'bg-amber-100' : 'bg-neutral-100'
+          }`}
         data-group-id={group.id}
       >
         <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
           <span className="inline-flex items-center gap-2">
+            {onToggleSelect && (
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-neutral-950"
+                checked={selected}
+                onChange={onToggleSelect}
+                aria-label={`Select ${group.room_name} to merge`}
+                title="Select to merge with other door groups"
+              />
+            )}
             {group.room_name}
+            {onUnmerge && (
+              <button
+                type="button"
+                onClick={onUnmerge}
+                className="inline-flex items-center gap-1 rounded border border-neutral-300 bg-white px-1.5 py-px text-[10px] font-semibold text-neutral-700 hover:bg-neutral-50"
+                title={`Merged from ${(group.merged_from ?? []).map((p) => `${p.room_name} (${Number(p.door_qty)})`).join(', ')}`}
+                aria-label={`Unmerge ${group.room_name}`}
+              >
+                <Split className="h-2.5 w-2.5" />
+                Unmerge
+              </button>
+            )}
             {onOpenComments && commentCount > 0 && (
               <button
                 type="button"
@@ -135,12 +172,21 @@ export function GroupRowsFragment({
         <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
           {group.leaf || ''}
         </td>
+        {/* The hardware every door in the group has (from the quotation's hardware columns). */}
+        <td
+          className="border border-neutral-300 px-2 py-1 text-[11px] font-normal text-neutral-600"
+          title={groupKeyHardware(group.group_key) ? 'Hardware from the quotation' : undefined}
+        >
+          {groupKeyHardware(group.group_key)}
+        </td>
         <td className="border border-neutral-300 px-2 py-1" />
         <td className="border border-neutral-300 px-2 py-1" />
-        <td className="border border-neutral-300 px-2 py-1" />
-        <td className="border border-neutral-300 px-2 py-1" />
+        {/* As in the Excel export: the label in DESCRIPTION, only the number in QTY. */}
+        <td className="border border-neutral-300 px-2 py-1 text-right font-mono whitespace-nowrap">
+          DOOR QTY:
+        </td>
         <td className="border border-neutral-300 px-2 py-1 text-right font-mono bg-neutral-200/70 whitespace-nowrap">
-          DOOR QTY: {group.door_qty}
+          {group.door_qty}
         </td>
         <td className="border border-neutral-300 px-2 py-1" />
         <td className="border border-neutral-300 px-2 py-1 text-right font-mono whitespace-nowrap">
@@ -179,24 +225,58 @@ export function GroupRowsFragment({
         const qty = Number(line.qty_per_door)
         const cost = line.unit_price === null ? null : Number(line.unit_price)
         const price = cost === null ? null : cost * markupFactor
-        const maker = manufacturerOf(line)
+        const maker = supplierOf(line)
 
         const isAdded = line.origin === 'added'
         const addedBg = isAdded ? 'bg-green-100/80' : ''
         const noPriceBg = cost === null ? 'bg-amber-50' : addedBg
 
+        const flag = line.review_flag?.trim() ?? ''
+
         return (
-          <tr key={line.id} className="bg-white">
-            <td className={CELL} />
+          <tr
+            key={line.id}
+            className={flag ? 'bg-orange-50' : 'bg-white'}
+            data-flagged={flag ? 'true' : undefined}
+          >
+            <td className={`${CELL} whitespace-nowrap`}>
+              {/* Flagged on import (e.g. a set part the quotation doesn't price): check, then clear. */}
+              {flag && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-orange-700" title={flag}>
+                  <Flag className="h-3 w-3" aria-hidden="true" />
+                  <span>Check</span>
+                  {editable && onClearFlag && (
+                    <button
+                      type="button"
+                      className="ml-1 rounded border border-orange-300 bg-white px-1 text-[10px] font-medium text-orange-800 hover:bg-orange-100"
+                      aria-label={`Clear flag: ${flag}`}
+                      title={`${flag} — click when checked`}
+                      onClick={() => onClearFlag(line)}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </span>
+              )}
+            </td>
             <td className={CELL} />
             <td className={CELL} />
             <td className={CELL} />
             <td className={CELL} />
             <td className={`${CELL} text-xs font-medium text-neutral-700 whitespace-nowrap ${addedBg}`}>
-              {maker?.ownerSupplied ? 'MM' : ''}
+              {maker?.legend ?? ''}
             </td>
             <td className={`${CELL} text-xs text-neutral-700 whitespace-nowrap ${addedBg}`}>
               {maker?.name ?? ''}
+              {maker?.other && (
+                <span
+                  className="ml-1.5 rounded border border-amber-300 bg-amber-50 px-1 py-px text-[10px] font-semibold uppercase text-amber-800"
+                  title="This part is from another supplier than the sheet's"
+                  data-testid="other-supplier-badge"
+                >
+                  Other supplier
+                </span>
+              )}
             </td>
             <td className={`border border-neutral-300 p-0 whitespace-nowrap ${addedBg}`}>
               {renderEditableCell(

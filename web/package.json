@@ -16,6 +16,7 @@
     "preview": "vite preview",
     "seed": "tsx ../supabase/seed/seed.ts",
     "seed:dry-run": "tsx ../supabase/seed/seed.ts --dry-run",
+    "import:parts": "tsx ../supabase/seed/import-parts.ts",
     "db:test": "tsx ../supabase/tests/run-sql-tests.ts"
   },
   "dependencies": {

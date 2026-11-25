@@ -40,14 +40,17 @@ interface ExportExcelDialogProps {
   projectId: string
   busy: boolean
   error: string | null
-  onExport: (values: { scheduleNo: string; sheetTitle: string }) => void
+  /** The version's supplier sheets; with more than one, the user picks which to export. */
+  sheets?: { id: string; name: string }[]
+  onExport: (values: { scheduleNo: string; sheetTitle: string; sheetIds: string[] }) => void
 }
 
 /**
  * Asks for the Schedule # (row 4 of the export), picked on the calendar-05
  * calendar (month/year dropdowns), and lets the user adjust the sheet title
  * (row 1). Both are remembered in this browser: the title for all projects,
- * the schedule date per project.
+ * the schedule date per project. With several supplier sheets, the user ticks
+ * which ones go into the file (all by default).
  */
 export function ExportExcelDialog({
   open,
@@ -55,29 +58,40 @@ export function ExportExcelDialog({
   projectId,
   busy,
   error,
+  sheets = [],
   onExport,
 }: ExportExcelDialogProps) {
   const [scheduleDate, setScheduleDate] = useState<Date | undefined>(undefined)
   const [sheetTitle, setSheetTitle] = useState(DEFAULT_EXPORT_TITLE)
   const [touched, setTouched] = useState(false)
+  const [chosen, setChosen] = useState<Set<string>>(new Set())
+  const sheetKey = sheets.map((s) => s.id).join(',')
 
   useEffect(() => {
     if (!open) return
     setScheduleDate(parseScheduleDate(readStored(scheduleKey(projectId))))
     setSheetTitle(readStored(TITLE_KEY) || DEFAULT_EXPORT_TITLE)
     setTouched(false)
-  }, [open, projectId])
+    setChosen(new Set(sheetKey ? sheetKey.split(',') : []))
+  }, [open, projectId, sheetKey])
 
   const scheduleNo = formatScheduleDate(scheduleDate)
   const missing = scheduleNo === ''
+  const chooseSheets = sheets.length > 1
+  const noSheet = chooseSheets && chosen.size === 0
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     setTouched(true)
-    if (missing) return
+    if (missing || noSheet) return
     writeStored(scheduleKey(projectId), serializeScheduleDate(scheduleDate))
     writeStored(TITLE_KEY, sheetTitle.trim() || DEFAULT_EXPORT_TITLE)
-    onExport({ scheduleNo, sheetTitle: sheetTitle.trim() || DEFAULT_EXPORT_TITLE })
+    onExport({
+      scheduleNo,
+      sheetTitle: sheetTitle.trim() || DEFAULT_EXPORT_TITLE,
+      // In tab order.
+      sheetIds: chooseSheets ? sheets.filter((s) => chosen.has(s.id)).map((s) => s.id) : sheets.map((s) => s.id),
+    })
   }
 
   return (
@@ -121,6 +135,37 @@ export function ExportExcelDialog({
             />
           </div>
 
+          {chooseSheets && (
+            <fieldset className="space-y-1.5">
+              <legend className="text-sm font-medium text-neutral-950">Supplier Sheets</legend>
+              <div className="space-y-1 rounded-md border border-neutral-200 p-2">
+                {sheets.map((s) => (
+                  <label key={s.id} className="flex items-center gap-2 text-sm text-neutral-900">
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 accent-neutral-950"
+                      checked={chosen.has(s.id)}
+                      onChange={(e) =>
+                        setChosen((prev) => {
+                          const next = new Set(prev)
+                          if (e.target.checked) next.add(s.id)
+                          else next.delete(s.id)
+                          return next
+                        })
+                      }
+                    />
+                    <span>{s.name}</span>
+                  </label>
+                ))}
+              </div>
+              {touched && noSheet && (
+                <p role="alert" className="text-xs font-medium text-neutral-950">
+                  Tick at least one sheet to export.
+                </p>
+              )}
+            </fieldset>
+          )}
+
           {error && (
             <div role="alert" className="border border-neutral-950 bg-neutral-50 p-2.5 text-xs text-neutral-950">
               {error}
@@ -131,7 +176,7 @@ export function ExportExcelDialog({
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy}>
+            <Button type="submit" disabled={busy || noSheet}>
               <Download className="h-3.5 w-3.5" />
               <span>{busy ? 'Exporting...' : 'Download'}</span>
             </Button>

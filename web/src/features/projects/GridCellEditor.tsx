@@ -13,6 +13,8 @@ interface GridCellEditorProps {
   /** SKU column: autocomplete from the parts library. */
   isSku: boolean
   parts: Part[]
+  /** Show each suggestion's supplier. */
+  showSupplier?: boolean
   alignRight?: boolean
   onCommit: (value: string, move?: CellMove) => void
   onCancel: () => void
@@ -28,6 +30,7 @@ export function GridCellEditor({
   initialValue,
   isSku,
   parts,
+  showSupplier = false,
   alignRight = false,
   onCommit,
   onCancel,
@@ -51,6 +54,7 @@ export function GridCellEditor({
         <SkuAutocomplete
           value={value}
           parts={parts}
+          showSupplier={showSupplier}
           onChange={setValue}
           onSelectPart={onSelectPart}
           placeholder="SKU..."

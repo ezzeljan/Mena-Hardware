@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, Layers, Plus, Search } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/features/auth/AuthContext'
 import {
   standardSetSchema,
@@ -235,9 +236,7 @@ export function StandardSetsPage() {
 
       {/* Table */}
       {setsQuery.isLoading ? (
-        <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
-          Loading standard sets...
-        </div>
+        <TableSkeleton rows={8} columns={4} label="Loading standard sets…" />
       ) : setsQuery.isError ? (
         <div
           role="alert"

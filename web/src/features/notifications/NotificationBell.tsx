@@ -28,7 +28,8 @@ function hrefFor(n: AppNotification): string | null {
   if (n.kind === 'assigned_estimator' || n.kind === 'assigned_pm') return `/projects/${n.project_id}`
   const version = n.version_id ? `version=${n.version_id}` : ''
   if (n.kind === 'comment') return `/projects/${n.project_id}/hardware?comments=open${version ? `&${version}` : ''}`
-  return `/projects/${n.project_id}/hardware`
+  // The version opens its builder quote.
+  return `/projects/${n.project_id}/hardware${version ? `?${version}` : ''}`
 }
 
 /** Header bell: unread count and the latest notifications (refreshed every 30s). */

@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, GitBranch, MessageSquare, Upload } from 'lucide-react'
+import { ArrowLeft, GitBranch, Lock, MessageSquare, Trophy, Upload } from 'lucide-react'
 import { projectDisplayName } from '@/lib/projectName'
+import { PageHeaderSkeleton, GridSkeleton } from '@/components/ui/skeleton'
 import { ProjectGridPanel } from '@/features/projects/ProjectGridPanel'
+import { SheetTabs } from '@/features/projects/SheetTabs'
 import { VersionsDiffDialog } from '@/features/projects/VersionsDiffDialog'
 import { ApprovalBar } from '@/features/projects/ApprovalBar'
-import { QuotationImportWizard } from '@/features/projects/QuotationImportWizard'
 import { canReviseFrom } from '@/features/projects/versionActions'
 import { useProjectDetail } from '@/features/projects/useProjectDetail'
-import { fetchVersionGroups } from '@/features/projects/projectData'
+import { fetchVersionGroups, fetchVersionSheets } from '@/features/projects/projectData'
 import {
   VersionCommentsDrawer,
   commentCountsByGroup,
@@ -19,42 +20,57 @@ import {
 import { Button } from '@/components/ui/button'
 
 /**
- * The project's hardware schedule: the Excel-like grid with its versions,
- * re-import, approval workflow and export. Project details and the team are
- * on the project overview (ProjectDetailPage).
+ * One builder quote of a project: the Excel-like grid with a tab per supplier
+ * sheet, its versions, re-import, approval workflow and export. Which quote:
+ * ?quote=<id>, or the quote of ?version=<id> (notification links), else the
+ * first quote. Project details and the team are on the overview.
  */
 export function ProjectHardwarePage() {
   const { id } = useParams<{ id: string }>()
-  const {
-    projectQuery,
-    project,
-    versions,
-    canEditContent,
-    canReview,
-    needsQuotation,
-    draftVersion,
-  } = useProjectDetail(id)
+  const { projectQuery, project, quotes, canEditContent, canReview } = useProjectDetail(id)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
+  // The button row element the grid portals its Export Excel button into.
+  const [exportSlot, setExportSlot] = useState<HTMLSpanElement | null>(null)
 
   const [versionsOpen, setVersionsOpen] = useState(false)
-  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
-  const [reimportOpen, setReimportOpen] = useState(false)
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(
+    searchParams.get('version'),
+  )
   const [reimportError, setReimportError] = useState<string | null>(null)
   // PM comments drawer (?comments=open&version=… opens it, e.g. from a notification).
-  const [searchParams, setSearchParams] = useSearchParams()
   const [commentsOpen, setCommentsOpen] = useState(searchParams.get('comments') === 'open')
   const [commentFilter, setCommentFilter] = useState<CommentFilter>('all')
   const [highlightGroupId, setHighlightGroupId] = useState<string | null>(null)
+  // Active sheet; the supplier is remembered so switching versions keeps the same tab.
+  const [activeSheet, setActiveSheet] = useState<{ id: string; supplierId: string } | null>(null)
 
+  // Which quote: ?quote, else the quote of the linked / selected version, else the first imported one.
+  const quoteParam = searchParams.get('quote')
+  const activeQuote = useMemo(() => {
+    const byParam = quotes.find((q) => q.id === quoteParam)
+    if (byParam) return byParam
+    const byVersion = quotes.find((q) => q.versions.some((v) => v.id === selectedVersionId))
+    return byVersion ?? quotes.find((q) => !q.needsQuotation) ?? quotes[0] ?? null
+  }, [quotes, quoteParam, selectedVersionId])
+
+  // Keep ?quote in the URL; drop the one-off notification parameters.
   useEffect(() => {
-    if (searchParams.get('comments') !== 'open') return
-    setCommentsOpen(true)
-    const linkedVersion = searchParams.get('version')
-    if (linkedVersion) setSelectedVersionId(linkedVersion)
+    if (!activeQuote) return
     const next = new URLSearchParams(searchParams)
-    next.delete('comments')
-    next.delete('version')
-    setSearchParams(next, { replace: true })
-  }, [searchParams, setSearchParams])
+    let changed = false
+    if (next.get('quote') !== activeQuote.id) {
+      next.set('quote', activeQuote.id)
+      changed = true
+    }
+    for (const key of ['comments', 'version']) {
+      if (next.has(key)) {
+        next.delete(key)
+        changed = true
+      }
+    }
+    if (changed) setSearchParams(next, { replace: true })
+  }, [activeQuote, searchParams, setSearchParams])
 
   useEffect(() => {
     if (!highlightGroupId) return
@@ -62,8 +78,8 @@ export function ProjectHardwarePage() {
     return () => clearTimeout(timer)
   }, [highlightGroupId])
 
-  // The grid registers a "save pending edits now" function; Submit and
-  // Re-import wait on it (B6).
+  // The grid registers a "save pending edits now" function; Submit, Re-import
+  // and Add sheet wait on it (B6).
   const savePendingRef = useRef<(() => Promise<boolean>) | null>(null)
   const registerSavePending = useCallback((fn: (() => Promise<boolean>) | null) => {
     savePendingRef.current = fn
@@ -73,12 +89,37 @@ export function ProjectHardwarePage() {
     [],
   )
 
+  const versions = useMemo(() => activeQuote?.versions ?? [], [activeQuote])
+  const draftVersion = activeQuote?.draftVersion ?? null
   const activeVersion =
     versions.find((v) => v.id === selectedVersionId) ?? draftVersion ?? versions[0] ?? null
 
+  const sheetsQuery = useQuery({
+    queryKey: ['quote_sheets', activeVersion?.id],
+    enabled: !!activeVersion?.id,
+    queryFn: () => fetchVersionSheets(activeVersion!.id),
+  })
+  const sheets = useMemo(() => sheetsQuery.data ?? [], [sheetsQuery.data])
+  const currentSheet =
+    sheets.find((s) => s.id === activeSheet?.id) ??
+    sheets.find((s) => s.supplier_id === activeSheet?.supplierId) ??
+    sheets[0] ??
+    null
+
   // PM comments on the selected version (hooks stay above the early returns).
   const commentsQuery = useVersionComments(activeVersion?.id)
-  const commentCounts = commentCountsByGroup(commentsQuery.data)
+  const sheetComments = useMemo(
+    () => (commentsQuery.data ?? []).filter((c) => !c.sheet_id || c.sheet_id === currentSheet?.id),
+    [commentsQuery.data, currentSheet?.id],
+  )
+  const commentCounts = commentCountsByGroup(sheetComments)
+  const commentCountsBySheet = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const c of commentsQuery.data ?? []) {
+      if (c.sheet_id) map.set(c.sheet_id, (map.get(c.sheet_id) ?? 0) + 1)
+    }
+    return map
+  }, [commentsQuery.data])
   const commentTotal = commentsQuery.data?.length ?? 0
   // Same query as the grid's, so this shares its cache.
   const groupsQuery = useQuery({
@@ -98,8 +139,9 @@ export function ProjectHardwarePage() {
 
   if (projectQuery.isLoading) {
     return (
-      <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
-        Loading hardware schedule...
+      <div className="space-y-4">
+        <PageHeaderSkeleton buttons={5} />
+        <GridSkeleton />
       </div>
     )
   }
@@ -125,28 +167,30 @@ export function ProjectHardwarePage() {
 
   const displayName = projectDisplayName(project)
 
-  if (needsQuotation) {
+  if (!activeQuote || activeQuote.needsQuotation) {
     return (
       <div className="space-y-6">
         {backToOverview}
         <div className="border border-dashed border-neutral-300 bg-neutral-50 p-8 text-center space-y-2">
           <div className="text-sm font-medium text-neutral-950">
-            {displayName} has no hardware schedule yet
+            {displayName} has no hardware quote yet
           </div>
           <p className="text-xs text-neutral-600">
-            The quotation is uploaded from the project overview.
+            Builder quotes are added from the project overview (New Quote).
           </p>
         </div>
       </div>
     )
   }
 
+  const locked = activeQuote.locked
+  const canEditQuote = canEditContent && !locked
+
   // Re-import: into the draft if there is one, otherwise as the next revision
   // of an approved / changes-requested latest version. Not while under review.
   const reimportBase = draftVersion ?? versions[0] ?? null
-  const nextVersionNo = Math.max(0, ...versions.map((v) => v.version_no)) + 1
   const canReimport =
-    canEditContent &&
+    canEditQuote &&
     !versions.some((v) => v.status === 'submitted') &&
     reimportBase !== null &&
     (reimportBase.status === 'draft' || canReviseFrom(reimportBase.status))
@@ -154,6 +198,13 @@ export function ProjectHardwarePage() {
   const openComments = (filter: CommentFilter = 'all') => {
     setCommentFilter(filter)
     setCommentsOpen(true)
+  }
+
+  const selectQuote = (quoteId: string) => {
+    setSelectedVersionId(null)
+    const next = new URLSearchParams(searchParams)
+    next.set('quote', quoteId)
+    setSearchParams(next)
   }
 
   const openReimport = async () => {
@@ -166,20 +217,57 @@ export function ProjectHardwarePage() {
       )
       return
     }
-    setReimportOpen(true)
+    // The import wizard has its own page.
+    navigate(`/projects/${project.id}/import?quote=${activeQuote.id}`)
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex items-center gap-3 min-w-0">
           {backToOverview}
-          <h1 className="text-lg font-bold tracking-tight text-neutral-950 truncate">
-            {displayName}
-          </h1>
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold tracking-tight text-neutral-950 truncate">
+              {displayName}
+            </h1>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-600">
+              {quotes.length > 1 ? (
+                <select
+                  aria-label="Select builder quote"
+                  value={activeQuote.id}
+                  onChange={(e) => selectQuote(e.target.value)}
+                  className="h-7 border border-neutral-300 bg-white px-2 text-xs font-semibold text-neutral-950 focus:outline-none focus:ring-1 focus:ring-neutral-950"
+                  data-testid="quote-select"
+                >
+                  {quotes.map((q) => (
+                    <option key={q.id} value={q.id} disabled={q.needsQuotation}>
+                      {q.builder_name}
+                      {q.isWinner ? ' (awarded)' : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="font-semibold text-neutral-950">
+                  Quote for {activeQuote.builder_name}
+                </span>
+              )}
+              {activeQuote.isWinner && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                  <Trophy className="h-3 w-3" />
+                  Awarded
+                </span>
+              )}
+              {locked && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-neutral-500">
+                  <Lock className="h-3 w-3" />
+                  The project was awarded to another quote; this one is read-only.
+                </span>
+              )}
+            </div>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+        <div className="flex flex-wrap items-center gap-2 xl:justify-end">
           <select
             aria-label="Select project version"
             value={activeVersion?.id ?? ''}
@@ -203,15 +291,17 @@ export function ProjectHardwarePage() {
             aria-pressed={commentsOpen}
           >
             <MessageSquare className="h-3.5 w-3.5" />
-            <span>PM Comments ({commentTotal})</span>
+            <span>Comments ({commentTotal})</span>
           </Button>
-          {canReimport && !reimportOpen && (
+          {canReimport && (
             <Button variant="outline" size="sm" onClick={() => void openReimport()}>
               <Upload className="h-3.5 w-3.5" />
               <span>Re-import Quotation</span>
             </Button>
           )}
-          {!reimportOpen && (
+          {/* The grid draws its Export Excel button here. */}
+          <span ref={setExportSlot} className="contents" />
+          {!locked && (
             // Version status note + Submit / Approve / Request Changes / New Draft.
             <ApprovalBar
               projectId={project.id}
@@ -226,49 +316,58 @@ export function ProjectHardwarePage() {
         </div>
       </div>
 
-      {reimportOpen && reimportBase ? (
-        <QuotationImportWizard
-          mode="reimport"
-          projectId={project.id}
-          projectName={displayName}
-          baseVersion={reimportBase}
-          nextVersionNo={nextVersionNo}
-          onCancel={() => setReimportOpen(false)}
-          onDone={(vid) => {
-            setReimportOpen(false)
-            setSelectedVersionId(vid)
-          }}
-        />
-      ) : (
-        <>
-          {reimportError && (
-            <div
-              role="alert"
-              className="border border-neutral-950 bg-neutral-50 p-3 text-xs text-neutral-950"
-            >
-              {reimportError}
-            </div>
-          )}
-
-          <ProjectGridPanel
-            projectName={displayName}
-            projectTitle={project.name}
-            clientName={project.client}
-            activeVersion={activeVersion}
-            canEdit={canEditContent}
-            commentCounts={commentCounts}
-            onOpenComments={(groupId) => openComments(groupId)}
-            highlightGroupId={highlightGroupId}
-            onRegisterSavePending={registerSavePending}
-          />
-        </>
+      {reimportError && (
+        <div
+          role="alert"
+          className="border border-neutral-950 bg-neutral-50 p-3 text-xs text-neutral-950"
+        >
+          {reimportError}
+        </div>
       )}
+
+      <div>
+        <ProjectGridPanel
+          projectName={displayName}
+          projectTitle={project.name}
+          clientName={activeQuote.builder_name}
+          activeVersion={activeVersion}
+          sheet={currentSheet}
+          sheets={sheets}
+          // The grid shows only the current sheet's lines: keep its skeleton until the sheets are in.
+          sheetsLoading={sheetsQuery.isLoading}
+          canEdit={canEditQuote}
+          commentCounts={commentCounts}
+          onOpenComments={(groupId) => openComments(groupId)}
+          highlightGroupId={highlightGroupId}
+          onRegisterSavePending={registerSavePending}
+          exportSlot={exportSlot}
+          // The sheet tabs sit in the grid's bar pinned to the bottom of the screen.
+          footer={
+            activeVersion && sheets.length > 0 ? (
+              <SheetTabs
+                versionId={activeVersion.id}
+                sheets={sheets}
+                activeSheetId={currentSheet?.id ?? null}
+                onSelect={(sheetId) => {
+                  const s = sheets.find((x) => x.id === sheetId)
+                  setActiveSheet({ id: sheetId, supplierId: s?.supplier_id ?? '' })
+                }}
+                editable={canEditQuote && activeVersion.status === 'draft'}
+                commentCounts={commentCountsBySheet}
+                savePendingEdits={savePendingEdits}
+              />
+            ) : null
+          }
+        />
+      </div>
 
       <VersionCommentsDrawer
         open={commentsOpen}
         onOpenChange={setCommentsOpen}
         version={activeVersion}
         groups={groupsQuery.data ?? []}
+        sheets={sheets}
+        activeSheetId={currentSheet?.id ?? null}
         filter={commentFilter}
         onFilterChange={setCommentFilter}
         canComment={canReview}
@@ -282,7 +381,8 @@ export function ProjectHardwarePage() {
         versions={versions}
         selectedVersionId={activeVersion?.id ?? null}
         onSelectVersion={(vid) => setSelectedVersionId(vid)}
-        canEdit={canEditContent}
+        canEdit={canEditQuote}
+        activeSupplierId={currentSheet?.supplier_id ?? null}
       />
     </div>
   )

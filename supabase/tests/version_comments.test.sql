@@ -12,6 +12,7 @@ begin;
 
 do $$
 declare
+  v_supplier uuid;
   v_admin uuid := '00000000-0000-0000-0000-000000000061';
   v_pm uuid := '00000000-0000-0000-0000-000000000062';
   v_other_pm uuid := '00000000-0000-0000-0000-000000000063';
@@ -39,6 +40,8 @@ begin
   update public.profiles set role = 'pm' where id in (v_pm, v_other_pm);
   update public.profiles set role = 'estimator' where id in (v_est, v_outsider);
 
+  insert into public.suppliers (name) values ('T SUPPLIER version_comments') returning id into v_supplier;
+
   execute 'set local role authenticated';
 
   perform set_config('request.jwt.claims', json_build_object('sub', v_pm, 'role', 'authenticated')::text, true);
@@ -47,7 +50,7 @@ begin
   insert into public.project_estimators (project_id, estimator_id, assigned_by) values (v_project, v_est, v_pm);
 
   perform set_config('request.jwt.claims', json_build_object('sub', v_est, 'role', 'authenticated')::text, true);
-  v_version := public.import_quotation(v_project, v_project::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
+  v_version := public.import_quotation(v_project, 'Builder A', v_supplier, v_project::text || '/q.xlsx', 'q.xlsx', '{}', '[]', v_groups);
   select id into v_group from public.door_groups where version_id = v_version;
   perform public.transition_version(v_version, 'submit', '');
 
@@ -59,7 +62,7 @@ begin
   insert into public.version_comments (version_id, author_id, body) values (v_version, v_pm, 'Overall looks fine');
 
   if not exists (select 1 from public.project_activity where project_id = v_project and action = 'comment_added'
-                 and actor_id = v_pm and summary = 'commented on ENTRY in v1'
+                 and actor_id = v_pm and summary = 'commented on ENTRY in Builder A v1'
                  and details->>'comment' = 'Use the satin finish hinges here') then
     raise exception 'TEST FAILED: A comment was not logged in the activity!';
   end if;

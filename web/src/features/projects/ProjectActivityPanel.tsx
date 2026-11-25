@@ -17,8 +17,10 @@ import {
   UserMinus,
   UserPlus,
   type LucideIcon,
+  Trash2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { ListSkeleton } from '@/components/ui/skeleton'
 import type { ActivityCategory, ProjectActivity } from '@/types/database'
 import { useProfileDirectory } from '@/features/account/useProfileDirectory'
 import { UserAvatar } from '@/components/avatar/UserAvatar'
@@ -52,6 +54,7 @@ const ACTION_ICON: Record<string, { icon: LucideIcon; tone: string }> = {
   estimator_removed: { icon: UserMinus, tone: 'bg-neutral-500 text-white' },
   quotation_imported: { icon: FilePlus2, tone: 'bg-sky-600 text-white' },
   quotation_reimported: { icon: FileSpreadsheet, tone: 'bg-sky-600 text-white' },
+  quote_deleted: { icon: Trash2, tone: 'bg-red-600 text-white' },
   revision_started: { icon: GitBranch, tone: 'bg-neutral-700 text-white' },
   version_submitted: { icon: Send, tone: 'bg-blue-600 text-white' },
   version_approved: { icon: Check, tone: 'bg-emerald-600 text-white' },
@@ -357,7 +360,7 @@ export function ProjectActivityPanel({ projectId, className = '' }: ProjectActiv
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {activityQuery.isLoading ? (
-          <p className="py-6 text-center text-xs text-neutral-500">Loading activity...</p>
+          <ListSkeleton rows={4} label="Loading activity…" className="border-0" />
         ) : activityQuery.isError ? (
           <p className="py-6 text-center text-xs text-red-700">Could not load the activity.</p>
         ) : entries.length === 0 ? (

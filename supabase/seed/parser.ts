@@ -30,7 +30,7 @@ export interface ParsedStandardSet {
 
 export interface ParsedPart {
   sku: string
-  manufacturer: 'MM' | 'NOVAS' | 'LOCKWOOD' | 'SCOPE' | 'GEZE' | 'FSH' | 'OTHER'
+  supplier: 'MM' | 'NOVAS' | 'LOCKWOOD' | 'SCOPE' | 'GEZE' | 'FSH' | 'OTHER'
   description: string
   unit_cost: number | null
   source: 'OSM_SHEET' | 'HARDWARE_SHEET'
@@ -45,19 +45,19 @@ export interface DataIssue {
 }
 
 export interface SeedParseResult {
-  manufacturers: Array<{ name: string; is_owner_supplied: boolean }>
+  suppliers: Array<{ name: string; is_owner_supplied: boolean }>
   parts: ParsedPart[]
   sets: ParsedStandardSet[]
   dataIssues: DataIssue[]
 }
 
-const KNOWN_MANUFACTURERS = ['NOVAS', 'LOCKWOOD', 'SCOPE', 'GEZE', 'FSH'] as const
+const KNOWN_SUPPLIERS = ['NOVAS', 'LOCKWOOD', 'SCOPE', 'GEZE', 'FSH'] as const
 
-export function inferManufacturer(
+export function inferSupplier(
   sku: string,
   description: string,
   forceMM = false,
-): ParsedPart['manufacturer'] {
+): ParsedPart['supplier'] {
   const cleanSku = sku.trim().toUpperCase()
   const cleanDesc = description.trim().toUpperCase()
 
@@ -66,7 +66,7 @@ export function inferManufacturer(
   }
 
   const firstWord = cleanDesc.split(/\s+/)[0] ?? ''
-  for (const mfg of KNOWN_MANUFACTURERS) {
+  for (const mfg of KNOWN_SUPPLIERS) {
     if (firstWord === mfg) {
       return mfg
     }
@@ -192,12 +192,12 @@ export async function parseHardwareWorkbook(xlsxPath: string): Promise<SeedParse
       }
 
       const isMM = col0 === 'MM' || col1 === 'MM' || sku.toUpperCase().startsWith('MM')
-      const manufacturer = inferManufacturer(sku, description, isMM)
+      const supplier = inferSupplier(sku, description, isMM)
 
       if (!partsMap.has(sku)) {
         partsMap.set(sku, {
           sku,
-          manufacturer,
+          supplier,
           description,
           unit_cost: unitCost,
           source: 'OSM_SHEET',
@@ -354,7 +354,7 @@ export async function parseHardwareWorkbook(xlsxPath: string): Promise<SeedParse
       if (!partsMap.has(line.sku)) {
         partsMap.set(line.sku, {
           sku: line.sku,
-          manufacturer: inferManufacturer(line.sku, line.description, false),
+          supplier: inferSupplier(line.sku, line.description, false),
           description: line.description,
           unit_cost: line.unit_price,
           source: 'HARDWARE_SHEET',
@@ -363,7 +363,7 @@ export async function parseHardwareWorkbook(xlsxPath: string): Promise<SeedParse
     }
   }
 
-  const manufacturers = [
+  const suppliers = [
     { name: 'MM', is_owner_supplied: true },
     { name: 'NOVAS', is_owner_supplied: false },
     { name: 'LOCKWOOD', is_owner_supplied: false },
@@ -374,7 +374,7 @@ export async function parseHardwareWorkbook(xlsxPath: string): Promise<SeedParse
   ]
 
   return {
-    manufacturers,
+    suppliers,
     parts: Array.from(partsMap.values()),
     sets,
     dataIssues,
@@ -389,10 +389,10 @@ export function formatSeedReport(result: SeedParseResult): string {
   lines.push(`Total Standard Sets parsed: ${result.sets.length}`)
   lines.push(`Total Unique Parts in Library: ${result.parts.length}`)
   lines.push('')
-  lines.push('Parts by Manufacturer:')
+  lines.push('Parts by Supplier:')
 
-  for (const mfg of result.manufacturers) {
-    const mfgParts = result.parts.filter((p) => p.manufacturer === mfg.name)
+  for (const mfg of result.suppliers) {
+    const mfgParts = result.parts.filter((p) => p.supplier === mfg.name)
     const nullCostCount = mfgParts.filter((p) => p.unit_cost === null).length
     const ownerTag = mfg.is_owner_supplied ? ' [Owner-Supplied]' : ''
     lines.push(

@@ -13,6 +13,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { PageHeaderSkeleton, TableSkeleton } from '@/components/ui/skeleton'
 import { fetchAllRows } from '@/lib/fetchAll'
 import { useAuth } from '@/features/auth/AuthContext'
 import {
@@ -100,7 +101,7 @@ export function StandardSetDetailPage() {
         supabase
           .from('parts')
           .select(
-            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at',
+            'id, sku, supplier_id, description, unit_cost, active, created_at, updated_at',
           )
           .order('sku', { ascending: true })
           .order('id', { ascending: true })
@@ -230,8 +231,9 @@ export function StandardSetDetailPage() {
 
   if (setQuery.isLoading) {
     return (
-      <div className="border border-neutral-200 p-10 text-center text-sm text-neutral-600">
-        Loading standard set...
+      <div className="space-y-6">
+        <PageHeaderSkeleton />
+        <TableSkeleton rows={8} columns={5} label="Loading standard set…" />
       </div>
     )
   }

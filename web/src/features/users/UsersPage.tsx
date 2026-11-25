@@ -3,6 +3,7 @@ import { Navigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Pencil, Users, X } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/features/auth/AuthContext'
 import { updateUserRoleSchema } from '@/lib/schemas'
 import type { Profile, UserRole } from '@/types/database'
@@ -117,9 +118,7 @@ export function UsersPage() {
       )}
 
       {profilesQuery.isLoading ? (
-        <div className="border border-neutral-200 p-8 text-center text-sm text-neutral-600">
-          Loading users...
-        </div>
+        <TableSkeleton rows={6} columns={4} label="Loading users…" />
       ) : profilesQuery.isError ? (
         <div
           role="alert"

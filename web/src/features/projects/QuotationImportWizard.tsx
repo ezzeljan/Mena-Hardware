@@ -1,3 +1,10 @@
+import { MergeDraftGroupsDialog } from '@/features/projects/MergeDraftGroupsDialog'
+import {
+  buildMergedGroup,
+  planDraftMerge,
+  unmergeGroup,
+  type DraftMergePlan,
+} from '@/features/projects/mergeParsedGroups'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -10,13 +17,19 @@ import {
   Sparkles,
   Upload,
   X,
+  Check,
+  Merge,
+  Search,
+  Split,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { fetchAllRows } from '@/lib/fetchAll'
+import { changeCounts, compareDoors, type DoorChanges, type DoorRecord } from '@/features/projects/doorChanges'
+import { DoorChangesSummary } from '@/features/projects/DoorChangesSummary'
+import { hardwareParts } from '@/features/projects/hardwareParts'
 import { useAuth } from '@/features/auth/AuthContext'
 import type {
   DoorGroup,
-  Part,
   ProjectLine,
   ProjectVersion,
   StandardSet,
@@ -24,14 +37,27 @@ import type {
 } from '@/types/database'
 import { fetchVersionGroups, fetchVersionLines } from '@/features/projects/projectData'
 import {
-  carriedLinesPayload,
   customNameFromReason,
   diffQuotationGroups,
 } from '@/features/projects/quotationReimport'
-import type {
-  ParsedDoorGroupPreview,
-  QuotationParseResult,
+import {
+  applyRowInclusions,
+  type ParsedDoorGroupPreview,
+  type ParsedQuotationDoor,
+  type QuotationParseResult,
 } from '@/features/projects/quotationParser'
+import {
+  makePartIndex,
+  parseDoorSize,
+  sizeSetLines,
+  type SizedLines,
+  type SizingPart,
+} from '@/features/projects/doorSizing'
+import { applyFlagRules, markByOthers } from '@/features/projects/doorFlags'
+import { applyHingeType } from '@/features/projects/hingeRules'
+import { applyActivityRules } from '@/features/projects/activityRules'
+import { applyLockRules } from '@/features/projects/lockRules'
+import { makeGroupFinder } from '@/features/projects/groupKey'
 import { parseQuotationInBackground } from '@/features/projects/quotationParseClient'
 import {
   AUTO_MATCH_THRESHOLD,
@@ -57,11 +83,18 @@ interface QuotationImportWizardProps {
   onCancel: () => void
   onDone: (versionId: string) => void
   /**
-   * 'reimport': load an updated quotation into a project that already has one.
-   * Door groups that didn't change keep their set, edited lines, prices and PM
-   * remarks; new groups are matched; removed groups are dropped.
+   * 'import': a new builder quote (builderName + the first sheet's supplier).
+   * 'reimport': load an updated quotation into an existing quote. Door groups
+   * that didn't change keep their set, and every supplier sheet keeps its
+   * lines; new groups are matched; removed groups are dropped.
    */
   mode?: 'import' | 'reimport'
+  /** Import only: the builder of the new quote. */
+  builderName?: string
+  /** Import only: supplier of the quote's first sheet. */
+  supplier?: { id: string; name: string } | null
+  /** Re-import only: the quote being re-imported. */
+  quoteId?: string | null
   /** Re-import only: the version the new file is compared with (the draft, or the latest version). */
   baseVersion?: ProjectVersion | null
   /** Re-import only: version number created when baseVersion is not a draft. */
@@ -69,6 +102,8 @@ interface QuotationImportWizardProps {
 }
 
 const CUSTOM_SET_VALUE = '__CUSTOM__'
+/** Dropdown value for a custom door group already used in the project: prefix + its name. */
+const SAVED_CUSTOM_PREFIX = '__CUSTOM__:'
 
 /** Only confident auto matches can be bulk-confirmed; the rest need a look each (B10). */
 function isHighConfidenceAuto(m: { matchStatus: string; matchedSetId: string | null; matchScore: number | null }) {
@@ -89,6 +124,147 @@ interface DraftGroupMatch {
   customGroupName: string
   /** Re-import: id of the unchanged group in baseVersion whose lines are kept. */
   carriedFromGroupId: string | null
+  /** Merged on this step: the groups it was made from (to unmerge, and saved as merged_from). */
+  mergedFrom?: DraftGroupMatch[]
+}
+
+interface SetLineDraft {
+  sku: string
+  description: string
+  qty_per_door: number
+  unit_price: number | null
+  part_id: string | null
+  /** 'added': an item the schedule asks for that the set doesn't have. */
+  origin: 'set' | 'added'
+  /** Why the estimator should check the line (a set part the quotation doesn't price). */
+  review_flag?: string
+  /** MHQT REMARKS ("BY OTHERS" on electrical items). */
+  mhqt_remarks?: string
+}
+
+function ItemList({ items, className = 'text-neutral-600', testId }: { items: string[]; className?: string; testId: string }) {
+  if (items.length === 0) return <span className="text-neutral-400">—</span>
+  return (
+    <ul className={`space-y-0.5 text-[11px] ${className}`} data-testid={testId}>
+      {items.map((t, i) => (
+        <li key={`${t}-${i}`} className="whitespace-nowrap">
+          {t}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * A door's hardware, one item per line, in groups: "Builder" (the door
+ * schedule's HW columns, named as in the quotation; a YES shows a check mark),
+ * items the comments ask for, then "Prep / Install" (the PREPARATION /
+ * INSTALLATION items).
+ */
+function HardwareCell({
+  hardware,
+  headers,
+  prepValues,
+  className = 'text-neutral-600',
+}: {
+  hardware: string | null | undefined
+  headers: Array<[string, string]>
+  prepValues?: Record<string, string>
+  className?: string
+}) {
+  const { builder, comments, prep } = hardwareParts(hardware ?? '', headers, prepValues)
+  if (builder.length === 0 && comments.length === 0 && prep.length === 0) {
+    return <span className="text-neutral-400">—</span>
+  }
+  return (
+    <div className="space-y-1">
+      {builder.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">Builder</div>
+          <ul className={`space-y-0.5 text-[11px] ${className}`} data-testid="hardware-items">
+            {builder.map((b) => (
+              <li key={b.header} className="flex items-center gap-1 whitespace-nowrap">
+                {b.value === null ? (
+                  <>
+                    <Check className="h-3 w-3 shrink-0 text-green-700" aria-label="Yes" />
+                    {b.header}
+                  </>
+                ) : (
+                  <>
+                    {b.header}: <span className="font-mono font-semibold">{b.value}</span>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {comments.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">From Comments</div>
+          <ItemList items={comments} className={className} testId="comment-items" />
+        </div>
+      )}
+      {prep.length > 0 && (
+        <div className={builder.length + comments.length > 0 ? 'border-t border-dashed border-neutral-300 pt-1' : ''}>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">Prep / Install</div>
+          <ItemList items={prep} className={className} testId="prep-items" />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * A door's or group's quotation comments, each once, in two groups: Door
+ * Schedule Comments, then Mena Contractors Comments.
+ */
+function CommentsCell({ doors }: { doors: Array<ParsedQuotationDoor | undefined> }) {
+  const distinct = (texts: Array<string | undefined>) => [
+    ...new Set(texts.flatMap((c) => (c ?? '').split(' | ')).map((c) => c.trim()).filter(Boolean)),
+  ]
+  const schedule = distinct(doors.map((d) => d?.schedule_comments))
+  const mena = distinct(doors.map((d) => d?.mena_comments))
+  // As coloured in the quotation: blue, red or black.
+  // A comment's colour on the doors that have it; 'mixed' when they differ.
+  const colorOf = (c: string): 'blue' | 'red' | 'black' | 'mixed' => {
+    const having = doors.filter((d) =>
+      [d?.schedule_comments, d?.mena_comments].some((t) => (t ?? '').split(' | ').map((x) => x.trim()).includes(c)),
+    )
+    const colors = new Set(having.map((d) => d?.comment_colors?.[c] ?? 'black'))
+    return colors.size > 1 ? 'mixed' : ([...colors][0] ?? 'black')
+  }
+  const COLOR_CLASS = {
+    blue: 'text-blue-700',
+    red: 'text-red-600',
+    black: 'text-neutral-900',
+    mixed: 'text-neutral-900 border-l-2 border-amber-400 pl-1',
+  } as const
+  if (schedule.length === 0 && mena.length === 0) return <span className="text-neutral-400">—</span>
+  const group = (title: string, items: string[], testId: string, divided: boolean) => (
+    <div className={divided ? 'border-t border-dashed border-neutral-300 pt-1' : ''} data-testid={testId}>
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">{title}</div>
+      {items.map((c) => {
+        const color = colorOf(c)
+        return (
+          <div
+            key={c}
+            className={`line-clamp-3 ${COLOR_CLASS[color]}`}
+            title={color === 'mixed' ? `${c} (a different colour on some doors in the quotation)` : c}
+            data-color={color}
+          >
+            {c}
+          </div>
+        )
+      })}
+    </div>
+  )
+  return (
+    <div className="max-w-xs space-y-1 text-[11px] text-neutral-700" data-testid="row-comments">
+      {schedule.length > 0 && group('Door Schedule Comments', schedule, 'schedule-comments', false)}
+      {mena.length > 0 && group('Mena Contractors Comments', mena, 'mena-comments', schedule.length > 0)}
+    </div>
+  )
 }
 
 const WIZARD_STEPS: StepperStep[] = [
@@ -108,6 +284,9 @@ export function QuotationImportWizard({
   onCancel,
   onDone,
   mode = 'import',
+  builderName = '',
+  supplier = null,
+  quoteId = null,
   baseVersion = null,
   nextVersionNo = 2,
 }: QuotationImportWizardProps) {
@@ -123,12 +302,34 @@ export function QuotationImportWizard({
   // Step 1: Upload & parse
   const [isDragging, setIsDragging] = useState(false)
   const [parsing, setParsing] = useState(false)
-  const [previewTab, setPreviewTab] = useState<'groups' | 'doors' | 'issues'>('groups')
+  const [previewTab, setPreviewTab] = useState<'groups' | 'doors' | 'variation' | 'excluded' | 'issues'>('groups')
   const [uploadedFile, setUploadedFile] = useState<File | null>(null)
+  // baseParse: the file as parsed; parseResult: with any excluded rows the estimator included.
+  const [baseParse, setBaseParse] = useState<QuotationParseResult | null>(null)
   const [parseResult, setParseResult] = useState<QuotationParseResult | null>(null)
 
   // Step 2: Matching state
   const [draftMatches, setDraftMatches] = useState<DraftGroupMatch[]>([])
+
+  // Custom door groups already used in this project (any quote / version):
+  // they're saved on the door groups as "Custom: <name>", so they can be
+  // picked again instead of typed.
+  const projectCustomGroupsQuery = useQuery({
+    queryKey: ['door_groups', 'custom-names', projectId],
+    queryFn: async (): Promise<string[]> => {
+      const { data, error } = await supabase
+        .from('door_groups')
+        .select('match_reason, project_versions!inner(project_id)')
+        .eq('project_versions.project_id', projectId)
+        .is('matched_set_id', null)
+        .like('match_reason', 'Custom:%')
+        .limit(1000)
+      if (error) throw error
+      return ((data ?? []) as { match_reason: string | null }[])
+        .map((g) => customNameFromReason(g.match_reason))
+        .filter(Boolean)
+    },
+  })
 
   const standardSetsQuery = useQuery({
     queryKey: ['standard_sets', 'for-matching'],
@@ -146,15 +347,24 @@ export function QuotationImportWizard({
   })
 
   const partsQuery = useQuery({
-    queryKey: ['parts', 'sku-lookup'],
-    queryFn: (): Promise<Pick<Part, 'id' | 'sku'>[]> =>
-      fetchAllRows<Pick<Part, 'id' | 'sku'>>((from, to) =>
-        supabase
-          .from('parts')
-          .select('id, sku')
-          .order('id', { ascending: true })
-          .range(from, to),
-      ),
+    queryKey: ['parts', 'sizing-lookup'],
+    queryFn: async (): Promise<SizingPart[]> => {
+      const [parts, folders] = await Promise.all([
+        fetchAllRows<SizingPart & { folder_id: string | null }>((from, to) =>
+          supabase
+            .from('parts')
+            .select('id, sku, legend, description, supplier_id, unit_cost, active, folder_id')
+            .order('id', { ascending: true })
+            .range(from, to),
+        ),
+        supabase.from('part_folders').select('id, name'),
+      ])
+      // The folder name, so items filed under "by others" are treated as such.
+      const folderName = new Map(
+        (Array.isArray(folders.data) ? (folders.data as Array<{ id: string; name: string }>) : []).map((f) => [f.id, f.name]),
+      )
+      return parts.map((p) => ({ ...p, folder: p.folder_id ? folderName.get(p.folder_id) : undefined }))
+    },
   })
 
   // Re-import: the current version's groups and lines, to keep unchanged groups.
@@ -170,8 +380,26 @@ export function QuotationImportWizard({
     },
   })
 
+  // Re-import: the doors of the upload being replaced, to show doors added / removed.
+  const previousUploadId = isReimport ? (baseVersion?.upload_id ?? null) : null
+  const previousDoorsQuery = useQuery({
+    queryKey: ['quotation-doors', previousUploadId],
+    enabled: !!previousUploadId,
+    queryFn: () =>
+      fetchAllRows<DoorRecord>((from, to) =>
+        supabase
+          .from('quotation_doors')
+          .select('door_ref, room_name, classification, leaf, door_size, qty, source_row, id')
+          .eq('upload_id', previousUploadId!)
+          .order('source_row')
+          .order('id')
+          .range(from, to),
+      ),
+  })
+
   const baseGroups = useMemo(() => baseQuery.data?.groups ?? [], [baseQuery.data])
-  const baseByKey = useMemo(() => new Map(baseGroups.map((g) => [g.group_key, g])), [baseGroups])
+  // Earlier groups by key (older keys without hardware are found too; see groupKey.ts).
+  const findBaseGroup = useMemo(() => makeGroupFinder(baseGroups), [baseGroups])
   const baseById = useMemo(() => new Map(baseGroups.map((g) => [g.id, g])), [baseGroups])
   const baseLinesByGroup = useMemo(() => {
     const map = new Map<string, ProjectLine[]>()
@@ -202,32 +430,138 @@ export function QuotationImportWizard({
     return map
   }, [partsQuery.data])
 
+  // Each new group's lines: the matched set's lines, plus items the schedule
+  // asks for (ES, CR, RS, kick plate, Vingcard, viewer; see doorFlags.ts), then
+  // sized for the group's door (hinges, seal lengths, drop seal / kick plate
+  // widths; see doorSizing.ts).
+  // Built once per load / parse, not per group or per keystroke.
+  const partIndex = useMemo(() => makePartIndex(partsQuery.data ?? []), [partsQuery.data])
+  // HW column headers as in the quotation ("Self Closing"), for the hardware lists.
+  const hwHeaders = useMemo(() => parseResult?.hardwareHeaders ?? [], [parseResult])
+  const doorByRow = useMemo(
+    () => new Map((parseResult?.doors ?? []).map((d) => [d.source_row, d])),
+    [parseResult],
+  )
+  // A group's sized lines only depend on its set (and the parse / library), so
+  // they're kept per group + set: typing a custom name or confirming a match
+  // doesn't redo them. A new parse or parts load starts a fresh cache.
+  const sizingCache = useMemo(
+    () => new Map<string, SizedLines<SetLineDraft> & { flagNotes: string[] }>(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [partIndex, doorByRow, setById, partBySku],
+  )
+
+  const sizedLinesByGroup = useMemo(() => {
+    const map = new Map<string, SizedLines<SetLineDraft> & { flagNotes: string[] }>()
+    for (const m of draftMatches) {
+      if (m.carriedFromGroupId || !m.matchedSetId) continue
+      const cacheKey = `${m.group.group_key}|${m.matchedSetId}|${m.group.source_rows.join(',')}|${m.group.hardware}`
+      const cached = sizingCache.get(cacheKey)
+      if (cached) {
+        map.set(m.group.group_key, cached)
+        continue
+      }
+      const set = setById.get(m.matchedSetId)
+      const setLines: SetLineDraft[] = [...(set?.standard_set_lines ?? [])]
+        .sort((a: StandardSetLine, b: StandardSetLine) => a.position - b.position)
+        .map((line) => ({
+          sku: line.sku,
+          description: line.description,
+          qty_per_door: Number(line.qty),
+          unit_price: line.unit_price,
+          part_id: partBySku.get(line.sku.trim().toUpperCase()) ?? null,
+          origin: 'set' as const,
+        }))
+      const doors = m.group.source_rows
+        .map((r) => doorByRow.get(r))
+        .filter((d): d is NonNullable<typeof d> => !!d)
+      const leaves = parseDoorSize(m.group.door_size)?.widths.length ?? 1
+      const addedLine = (part: SizingPart, qty: number): SetLineDraft => ({
+        sku: part.sku,
+        description: part.description,
+        qty_per_door: qty,
+        unit_price: part.unit_cost,
+        part_id: part.id,
+        origin: 'added',
+      })
+      // Prep / install costs first: add priced parts the set lacks, raise
+      // quantities, flag set parts that aren't priced (doorActivities.ts).
+      const priced = applyActivityRules(
+        setLines,
+        {
+          activities: m.group.activities ?? {},
+          leaf: m.group.leaf,
+          comments: doors.map((d) => d.comments).join(' | '),
+          leaves,
+        },
+        parseResult?.activityColumns ?? [],
+        partIndex,
+        addedLine,
+      )
+      // LOCK PREP / LOCK INST: change the set's lock parts to what's priced.
+      const locked = applyLockRules(
+        priced.lines,
+        {
+          lockCost: m.group.lock_cost ?? '',
+          hardware: m.group.hardware,
+          room: m.group.match_room || m.group.room_name,
+        },
+        partIndex,
+        addedLine,
+      )
+      // Hinge column: LO lift off, BH ball bearing.
+      const hinged = applyHingeType(locked.lines, m.group.hardware, partIndex, addedLine)
+      const flagged = applyFlagRules(hinged.lines, doors, leaves, partIndex, addedLine, {
+        costColumns: parseResult?.activityColumns ?? [],
+        activities: m.group.activities ?? {},
+      })
+      const sizedRaw = sizeSetLines(flagged.lines, m.group, partIndex)
+      // Electrical items: on the door, no price, BY OTHERS.
+      const others = markByOthers(sizedRaw.lines, partIndex)
+      const sized = { ...sizedRaw, lines: others.lines }
+      const entry = {
+        ...sized,
+        flagNotes: [...priced.notes, ...locked.notes, ...hinged.notes, ...flagged.notes, ...others.notes],
+      }
+      sizingCache.set(cacheKey, entry)
+      map.set(m.group.group_key, entry)
+    }
+    return map
+  }, [draftMatches, setById, partBySku, partIndex, doorByRow, sizingCache, parseResult])
+
+  // Each group's candidate sets depend only on the parse and the sets, not on
+  // the estimator's choices, so they're worked out once per parse.
   const candidateMap = useMemo(() => {
     const map = new Map<string, GroupMatchResult>()
     if (standardSets.length === 0) return map
-    for (const item of draftMatches) {
+    for (const g of parseResult?.groups ?? []) {
       map.set(
-        item.group.group_key,
+        g.group_key,
         matchDoorGroup(
           {
-            id: item.group.group_key,
-            room_name: item.group.room_name,
-            classification: item.group.classification ?? '',
-            leaf: item.group.leaf ?? '',
-            door_size: item.group.door_size ?? '',
+            id: g.group_key,
+            // A merged group is matched on its room with the most doors.
+            room_name: g.match_room || g.room_name,
+            classification: g.classification ?? '',
+            leaf: g.leaf ?? '',
+            door_size: g.door_size ?? '',
           },
           standardSets,
         ),
       )
     }
     return map
-  }, [draftMatches, standardSets])
+  }, [parseResult, standardSets])
 
   const initializeMatchesFromParse = useCallback(
-    (result: QuotationParseResult) => {
+    (result: QuotationParseResult, keep?: Map<string, DraftGroupMatch>) => {
       const next: DraftGroupMatch[] = result.groups.map((g) => {
+        // A group that was already here keeps the estimator's choice (its
+        // doors may have changed when a row was included).
+        const kept = keep?.get(g.group_key)
+        if (kept) return { ...kept, group: g }
         // Re-import: an unchanged door group keeps what it had.
-        const base = isReimport ? baseByKey.get(g.group_key) : undefined
+        const base = isReimport ? findBaseGroup(g.group_key) : undefined
         if (base) {
           const status: DraftGroupMatch['matchStatus'] =
             base.match_status === 'auto' || base.match_status === 'unmatched'
@@ -261,7 +595,7 @@ export function QuotationImportWizard({
         const m = matchDoorGroup(
           {
             id: g.group_key,
-            room_name: g.room_name,
+            room_name: g.match_room || g.room_name,
             classification: g.classification ?? '',
             leaf: g.leaf ?? '',
             door_size: g.door_size ?? '',
@@ -280,7 +614,7 @@ export function QuotationImportWizard({
       })
       setDraftMatches(next)
     },
-    [standardSets, isReimport, baseByKey],
+    [standardSets, isReimport, findBaseGroup],
   )
 
   useEffect(() => {
@@ -310,6 +644,7 @@ export function QuotationImportWizard({
       const buffer = await file.arrayBuffer()
       const result = await parseQuotationInBackground(buffer)
       setUploadedFile(file)
+      setBaseParse(result)
       setParseResult(result)
       setPreviewTab('groups')
       initializeMatchesFromParse(result)
@@ -318,11 +653,24 @@ export function QuotationImportWizard({
         err instanceof Error ? err.message : 'Failed to parse quotation workbook.',
       )
       setUploadedFile(null)
+      setBaseParse(null)
       setParseResult(null)
       setDraftMatches([])
     } finally {
       setParsing(false)
     }
+  }
+
+  // Include (or exclude again) an excluded row; groups are worked out again and re-matched.
+  const toggleIncludedRow = (row: number) => {
+    if (!baseParse || !parseResult) return
+    const rows = new Set(parseResult.includedRows)
+    if (rows.has(row)) rows.delete(row)
+    else rows.add(row)
+    const next = applyRowInclusions(baseParse, rows)
+    setParseResult(next)
+    // Groups that are still there keep their matches; new ones are matched.
+    initializeMatchesFromParse(next, new Map(draftMatches.map((m) => [m.group.group_key, m])))
   }
 
   const runAutoMatch = () => {
@@ -335,7 +683,8 @@ export function QuotationImportWizard({
         const m = matchDoorGroup(
           {
             id: item.group.group_key,
-            room_name: item.group.room_name,
+            // A merged group is matched on its room with the most doors.
+            room_name: item.group.match_room || item.group.room_name,
             classification: item.group.classification ?? '',
             leaf: item.group.leaf ?? '',
             door_size: item.group.door_size ?? '',
@@ -358,6 +707,24 @@ export function QuotationImportWizard({
     setDraftMatches((prev) =>
       prev.map((item) =>
         isHighConfidenceAuto(item) ? { ...item, matchStatus: 'confirmed' } : item,
+      ),
+    )
+  }
+
+  // Every AUTO match that has a set, low-confidence ones included (asks first).
+  const confirmEveryAuto = () => {
+    if (
+      lowConfidenceAutoCount > 0 &&
+      !window.confirm(
+        `Confirm all ${allAutoWithSetCount} auto matches, including ${lowConfidenceAutoCount} below ${Math.round(AUTO_MATCH_THRESHOLD * 100)}%? Check those matches first if you're not sure.`,
+      )
+    ) {
+      return
+    }
+    setStepError(null)
+    setDraftMatches((prev) =>
+      prev.map((item) =>
+        item.matchStatus === 'auto' && item.matchedSetId ? { ...item, matchStatus: 'confirmed' } : item,
       ),
     )
   }
@@ -389,15 +756,31 @@ export function QuotationImportWizard({
             customGroupName: '',
           }
         }
-        if (setId === CUSTOM_SET_VALUE) {
-          const trimmed = item.customGroupName.trim()
+        if (setId.startsWith(SAVED_CUSTOM_PREFIX)) {
+          const name = setId.slice(SAVED_CUSTOM_PREFIX.length)
           return {
             ...item,
-          carriedFromGroupId: null,
+            carriedFromGroupId: null,
+            matchedSetId: null,
+            matchStatus: 'manual',
+            matchScore: null,
+            matchReason: `Custom: ${name}`,
+            customGroupName: name,
+          }
+        }
+        if (setId === CUSTOM_SET_VALUE) {
+          // A new custom group: start from a blank name when switching away
+          // from a saved one, else keep what was typed.
+          const keep = item.matchStatus === 'manual' && !item.matchedSetId ? '' : item.customGroupName
+          const trimmed = keep.trim()
+          return {
+            ...item,
+            carriedFromGroupId: null,
             matchedSetId: null,
             matchStatus: 'manual',
             matchScore: null,
             matchReason: trimmed ? `Custom: ${trimmed}` : 'Custom door group',
+            customGroupName: keep,
           }
         }
         const set = setById.get(setId)
@@ -434,6 +817,89 @@ export function QuotationImportWizard({
     )
   }
 
+  const savedCustomNames = useMemo(() => {
+    const byKey = new Map<string, string>()
+    const add = (name: string) => {
+      const t = name.trim()
+      if (t && !byKey.has(t.toUpperCase())) byKey.set(t.toUpperCase(), t)
+    }
+    for (const n of projectCustomGroupsQuery.data ?? []) add(n)
+    for (const m of draftMatches) if (m.matchStatus === 'manual' && !m.matchedSetId) add(m.customGroupName)
+    return [...byKey.values()].sort((a, b) => a.localeCompare(b))
+  }, [projectCustomGroupsQuery.data, draftMatches])
+  const savedCustomValue = (name: string): string | null => {
+    const t = name.trim().toUpperCase()
+    const hit = t ? savedCustomNames.find((n) => n.toUpperCase() === t) : undefined
+    return hit ? SAVED_CUSTOM_PREFIX + hit : null
+  }
+
+  // Filter the Matching Review list: by door group (room, tag, specs,
+  // hardware, set) and by status. Bulk buttons still act on every group.
+  const [groupFilter, setGroupFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'ALL' | DraftGroupMatch['matchStatus']>('ALL')
+  const visibleMatches = useMemo(() => {
+    const q = groupFilter.trim().toLowerCase()
+    return draftMatches.filter((m) => {
+      if (statusFilter !== 'ALL' && m.matchStatus !== statusFilter) return false
+      if (!q) return true
+      const g = m.group
+      const setName = m.matchedSetId ? setById.get(m.matchedSetId)?.room_name ?? '' : m.customGroupName
+      return [g.room_name, g.door_tag, g.classification, g.leaf, g.door_size, g.hardware, setName]
+        .some((v) => (v ?? '').toLowerCase().includes(q))
+    })
+  }, [draftMatches, groupFilter, statusFilter, setById])
+
+  // Merge / unmerge door groups before saving.
+  const [selectedForMerge, setSelectedForMerge] = useState<Set<string>>(new Set())
+  const [draftMergePlan, setDraftMergePlan] = useState<DraftMergePlan | null>(null)
+  const selectedMergeItems = draftMatches.filter((m) => selectedForMerge.has(m.group.group_key))
+  const toggleMergeSelect = (groupKey: string) =>
+    setSelectedForMerge((prev) => {
+      const next = new Set(prev)
+      if (next.has(groupKey)) next.delete(groupKey)
+      else next.add(groupKey)
+      return next
+    })
+  const confirmDraftMerge = (roomName: string, include: Set<string>) => {
+    if (!draftMergePlan) return
+    const items = [...selectedMergeItems].sort((a, b) => a.group.position - b.group.position)
+    const [first] = items
+    const merged: DraftGroupMatch = {
+      ...first,
+      group: buildMergedGroup(draftMergePlan, roomName, include),
+      // A merged group merged again remembers the original groups.
+      mergedFrom: items.flatMap((i) => i.mergedFrom ?? [i]),
+    }
+    const drop = new Set(items.slice(1).map((i) => i.group.group_key))
+    setDraftMatches((prev) =>
+      prev
+        .filter((m) => !drop.has(m.group.group_key))
+        .map((m) => (m.group.group_key === first.group.group_key ? merged : m)),
+    )
+    setSelectedForMerge(new Set())
+    setDraftMergePlan(null)
+  }
+  const unmergeDraft = (groupKey: string) => {
+    setDraftMatches((prev) =>
+      prev.flatMap((m) => {
+        if (m.group.group_key !== groupKey || !m.mergedFrom) return [m]
+        const groups = unmergeGroup(m.group, m.mergedFrom.map((p) => p.group))
+        // Each gets the merged group's current set / custom name and hardware.
+        return m.mergedFrom.map((p, i) => ({
+          ...p,
+          group: groups[i],
+          matchedSetId: m.matchedSetId,
+          matchStatus: m.matchStatus,
+          matchScore: m.matchScore,
+          matchReason: m.matchReason,
+          customGroupName: m.customGroupName,
+          carriedFromGroupId: null,
+          mergedFrom: undefined,
+        }))
+      }),
+    )
+  }
+
   const matchedCount = draftMatches.filter((m) => Boolean(m.matchedSetId)).length
   const customCount = draftMatches.filter(
     (m) => m.matchStatus === 'manual' && !m.matchedSetId,
@@ -447,6 +913,9 @@ export function QuotationImportWizard({
   const autoCount = draftMatches.filter((m) => m.matchStatus === 'auto').length
   const highConfidenceAutoCount = draftMatches.filter(isHighConfidenceAuto).length
   const lowConfidenceAutoCount = autoCount - highConfidenceAutoCount
+  const allAutoWithSetCount = draftMatches.filter(
+    (m) => m.matchStatus === 'auto' && m.matchedSetId !== null,
+  ).length
   const unmatchedCount = draftMatches.filter((m) => m.matchStatus === 'unmatched').length
 
   const importMutation = useMutation({
@@ -457,6 +926,9 @@ export function QuotationImportWizard({
       }
       if (unmatchedCount > 0 || blankCustomCount > 0) {
         throw new Error('All door groups must be matched or have a custom door group name.')
+      }
+      if (isReimport ? !quoteId : !builderName.trim() || !supplier) {
+        throw new Error(isReimport ? 'No quote selected.' : 'Choose the builder and supplier first.')
       }
 
       // 1. Upload the .xlsx to Storage (path must start with the project id).
@@ -486,7 +958,8 @@ export function QuotationImportWizard({
 
       const groups = draftMatches.map((m) => {
         if (m.carriedFromGroupId) {
-          // Unchanged group: keep its lines (edits and prices) and PM remarks; new door qty.
+          // Unchanged group: every sheet keeps its lines (edits and prices), the
+          // PM remarks stay; new door qty. The database copies the lines.
           const base = baseById.get(m.carriedFromGroupId)
           return {
             position: m.group.position,
@@ -502,13 +975,11 @@ export function QuotationImportWizard({
             match_score: m.matchScore,
             match_reason: m.matchReason,
             pm_remarks: base?.pm_remarks ?? '',
-            lines: carriedLinesPayload(baseLinesByGroup.get(m.carriedFromGroupId) ?? []),
+            carried_from_group_id: m.carriedFromGroupId,
+            lines: [],
           }
         }
-        const set = m.matchedSetId ? setById.get(m.matchedSetId) : undefined
-        const setLines = [...(set?.standard_set_lines ?? [])].sort(
-          (a: StandardSetLine, b: StandardSetLine) => a.position - b.position,
-        )
+        const setLines = sizedLinesByGroup.get(m.group.group_key)?.lines ?? []
         return {
           position: m.group.position,
           group_key: m.group.group_key,
@@ -522,31 +993,61 @@ export function QuotationImportWizard({
           match_status: m.matchStatus,
           match_score: m.matchScore,
           match_reason: m.matchReason,
-          // Copy the standard set's lines; a blank set price stays null (never 0).
+          // The standard set's lines plus flagged items, sized for the door; a
+          // blank set price stays null (never 0).
           lines: setLines.map((line, idx) => ({
             position: idx + 1,
             sku: line.sku,
             description: line.description,
-            qty_per_door: line.qty,
+            qty_per_door: line.qty_per_door,
             unit_price: line.unit_price,
-            origin: 'set',
-            part_id: partBySku.get(line.sku.trim().toUpperCase()) ?? null,
+            origin: line.origin,
+            part_id: line.part_id,
+            review_flag: line.review_flag ?? '',
+            mhqt_remarks: line.mhqt_remarks ?? '',
           })),
         }
       })
 
-      const { data: versionId, error: importErr } = await supabase.rpc(
-        isReimport ? 'reimport_quotation' : 'import_quotation',
-        {
-        p_project_id: projectId,
+      const common = {
         p_storage_path: storagePath,
         p_original_filename: uploadedFile.name,
-        p_parse_report: parseResult.report,
+        // The doors compared with the replaced upload, for the project page.
+        p_parse_report: doorChanges
+          ? {
+              ...parseResult.report,
+              previous_upload_id: previousUploadId,
+              door_changes: { ...changeCounts(doorChanges), previousTotal: doorChanges.previousTotal, currentTotal: doorChanges.currentTotal },
+            }
+          : parseResult.report,
         p_doors: doors,
-          p_groups: groups,
-        },
-      )
+        p_groups: groups,
+      }
+      const { data: versionId, error: importErr } = isReimport
+        ? await supabase.rpc('reimport_quotation', { p_quote_id: quoteId, ...common })
+        : await supabase.rpc('import_quotation', {
+            p_project_id: projectId,
+            p_builder_name: builderName.trim(),
+            p_supplier_id: supplier!.id,
+            ...common,
+          })
       if (importErr) throw importErr
+
+      for (const m of draftMatches.filter((x) => x.mergedFrom && x.mergedFrom.length > 1)) {
+        const { error: mergeErr } = await supabase
+          .from('door_groups')
+          .update({
+            merged_from: m.mergedFrom!.map((p) => ({
+              group_key: p.group.group_key,
+              room_name: p.group.room_name,
+              door_qty: p.group.door_qty,
+              door_tag: p.group.door_tag,
+            })),
+          })
+          .eq('version_id', versionId as string)
+          .eq('group_key', m.group.group_key)
+        if (mergeErr) throw mergeErr
+      }
 
       return versionId as string
     },
@@ -556,6 +1057,7 @@ export function QuotationImportWizard({
       // A re-imported draft keeps its id, so its cached groups/lines must refresh.
       await queryClient.invalidateQueries({ queryKey: ['door_groups'] })
       await queryClient.invalidateQueries({ queryKey: ['project_lines'] })
+      await queryClient.invalidateQueries({ queryKey: ['quote_sheets'] })
       onDone(versionId)
     },
     onError: (err: Error) => {
@@ -604,6 +1106,61 @@ export function QuotationImportWizard({
     [isReimport, parseResult, baseGroups],
   )
   const keptCount = draftMatches.filter((m) => m.carriedFromGroupId).length
+  const doorChanges: DoorChanges | null = useMemo(
+    () => (parseResult && previousDoorsQuery.data ? compareDoors(previousDoorsQuery.data, parseResult.doors) : null),
+    [parseResult, previousDoorsQuery.data],
+  )
+  const variationAdded = parseResult ? parseResult.doors.filter((d) => d.variation).reduce((n, d) => n + d.qty, 0) : 0
+  const variationUncounted = parseResult
+    ? parseResult.variationRows.filter((v) => v.kind === 'added' && v.qty === null).length
+    : 0
+  const variationRemoved = parseResult
+    ? parseResult.variationRows.filter((v) => v.kind === 'removed').reduce((n, v) => n + (v.qty ?? 0), 0)
+    : 0
+  // Each green row: counted or not, and the door group it's in (an existing
+  // group when it has doors that aren't in the variation, else a new group).
+  const variationDetails = useMemo(() => {
+    if (!parseResult) return []
+    const doorByRowHere = new Map(parseResult.doors.map((d) => [d.source_row, d]))
+    const excludedRows = new Map(parseResult.excluded.map((e) => [e.row, e]))
+    return parseResult.variationRows.map((v) => {
+      const door = doorByRowHere.get(v.row) ?? null
+      const group = door ? parseResult.groups.find((g) => g.source_rows.includes(v.row)) ?? null : null
+      const others = group
+        ? group.source_rows.filter((row) => !doorByRowHere.get(row)?.variation).reduce((n, row) => n + (doorByRowHere.get(row)?.qty ?? 0), 0)
+        : 0
+      const status = door
+        ? 'added'
+        : v.kind === 'removed'
+          ? 'removed'
+          : excludedRows.has(v.row)
+            ? 'excluded'
+            : 'not counted'
+      return { v, door, group, existing: others > 0, others, excludedReason: excludedRows.get(v.row)?.reason ?? '', status }
+    })
+      // The doors added first, then rows that aren't counted.
+      .sort((a, b) => {
+        const rank = (s: string) => (s === 'added' ? 0 : s === 'removed' ? 1 : 2)
+        return rank(a.status) - rank(b.status) || a.v.row - b.v.row
+      })
+  }, [parseResult])
+
+  const variationPanel = parseResult && parseResult.variationRows.length > 0 && (
+    <div className="border border-green-700 bg-green-50 rounded p-3 text-xs text-green-900" data-testid="variation-summary">
+      <span className="font-semibold">Variation: </span>
+      {variationAdded} door{variationAdded === 1 ? '' : 's'} added (QTY filled)
+      {variationUncounted > 0 && `; ${variationUncounted} row${variationUncounted === 1 ? '' : 's'} without a QTY not counted`}
+      {variationRemoved > 0 && `; ${variationRemoved} door${variationRemoved === 1 ? '' : 's'} excluded (red rows)`}.
+    </div>
+  )
+  const doorChangesPanel = doorChanges && baseVersion && (
+    <div className="border border-neutral-300 bg-neutral-50 rounded p-3 space-y-1.5">
+      <div className="text-xs font-semibold text-neutral-950">
+        Doors compared with the file of v{baseVersion.version_no}
+      </div>
+      <DoorChangesSummary changes={doorChanges} />
+    </div>
+  )
 
   const targetLabel = !isReimport
     ? 'Create Version 1'
@@ -612,6 +1169,8 @@ export function QuotationImportWizard({
       : `Create Version ${nextVersionNo}`
 
   const changesPanel = quotationChanges && baseVersion && (
+    <div className="space-y-2">
+    {doorChangesPanel}
     <div className="border border-neutral-300 bg-neutral-50 rounded p-3 text-xs space-y-1.5">
       <div className="font-semibold text-neutral-950">
         Changes compared with v{baseVersion.version_no}
@@ -642,6 +1201,29 @@ export function QuotationImportWizard({
             .join(', ')}
         </div>
       )}
+      {quotationChanges.split.length > 0 && (
+        <div className="font-medium text-neutral-950">
+          Split by hardware (each new group keeps the old lines — check them):{' '}
+          {quotationChanges.split
+            .map(
+              (s) =>
+                `${[s.base.door_tag, s.base.room_name].filter(Boolean).join(' ')} → ${s.groups
+                  .map((g) => `${g.door_qty} × ${g.hardware || 'no hardware'}`)
+                  .join(' / ')}`,
+            )
+            .join('; ')}
+        </div>
+      )}
+      {quotationChanges.merged.length > 0 && (
+        <div className="font-medium text-neutral-950">
+          Rooms merged into one door group (it keeps the lines of the group with the most doors —
+          check them):{' '}
+          {quotationChanges.merged
+            .map((m) => `${[m.group.door_tag, m.group.room_name].filter(Boolean).join(' ')}`)
+            .join('; ')}
+        </div>
+      )}
+    </div>
     </div>
   )
 
@@ -649,9 +1231,19 @@ export function QuotationImportWizard({
     if (m.carriedFromGroupId) {
       return sum + (baseLinesByGroup.get(m.carriedFromGroupId)?.length ?? 0)
     }
-    if (!m.matchedSetId) return sum
-    return sum + (setById.get(m.matchedSetId)?.standard_set_lines?.length ?? 0)
+    return sum + (sizedLinesByGroup.get(m.group.group_key)?.lines.length ?? 0)
   }, 0)
+  const sizedGroupCount = [...sizedLinesByGroup.values()].filter((s) => s.notes.length > 0).length
+  const flaggedLineCount = [...sizedLinesByGroup.values()].reduce(
+    (n, s) => n + s.lines.filter((l) => l.review_flag).length,
+    0,
+  )
+  const addedLineCount = [...sizedLinesByGroup.values()].reduce(
+    (n, s) => n + s.lines.filter((l) => l.origin === 'added').length,
+    0,
+  )
+  const sheetTotalMismatch =
+    parseResult?.sheetQtyTotal != null && parseResult.sheetQtyTotal !== parseResult.totalDoorQty
 
   return (
     <div className="border border-neutral-950 rounded-md bg-white p-6 space-y-6">
@@ -662,12 +1254,12 @@ export function QuotationImportWizard({
           </h2>
           <p className="text-xs text-neutral-600 mt-0.5">
             {isReimport
-              ? `Upload the updated quotation for ${projectName}. Door groups that haven't changed keep their hardware, edits and prices; new groups are matched to standard sets. ${
+              ? `Upload the updated quotation for ${projectName}. Door groups that haven't changed keep their hardware, edits and prices on every supplier sheet; new groups are matched to standard sets. ${
                   replacesDraft
                     ? `This replaces the quotation in draft v${baseVersion?.version_no}.`
                     : `This creates v${nextVersionNo}; v${baseVersion?.version_no} is kept in the history.`
                 }`
-              : `Upload the quotation, review the door-to-set matches, then create version 1 of ${projectName}.`}
+              : `Upload ${builderName.trim() || 'the builder'}'s quotation for ${projectName}, review the door-to-set matches, then create version 1 of the quote. The first supplier sheet is ${supplier?.name ?? '—'}.`}
           </p>
         </div>
         <Button
@@ -776,6 +1368,14 @@ export function QuotationImportWizard({
                   <div className="text-lg font-bold font-mono text-neutral-950">
                     {parseResult.totalDoorQty}
                   </div>
+                  {parseResult.sheetQtyTotal != null && (
+                    <div
+                      className={`text-[11px] font-mono ${sheetTotalMismatch ? 'font-semibold text-red-700' : 'text-neutral-500'}`}
+                    >
+                      Sheet total {parseResult.sheetQtyTotal}
+                      {sheetTotalMismatch ? ' — check Issues' : ' ✓'}
+                    </div>
+                  )}
                 </div>
                 <div className="border border-neutral-200 p-2.5 rounded">
                   <div className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">
@@ -803,6 +1403,9 @@ export function QuotationImportWizard({
                 </div>
               </div>
 
+              {variationPanel}
+              {doorChangesPanel}
+
               <div className="flex items-center gap-2 border-b border-neutral-200 pb-2">
                 <Button
                   type="button"
@@ -819,6 +1422,24 @@ export function QuotationImportWizard({
                   onClick={() => setPreviewTab('doors')}
                 >
                   Parsed Rows ({parseResult.doors.length})
+                </Button>
+                {parseResult.variationRows.length > 0 && (
+                  <Button
+                    type="button"
+                    variant={previewTab === 'variation' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setPreviewTab('variation')}
+                  >
+                    Variation ({variationAdded} added{variationRemoved > 0 ? `, ${variationRemoved} excluded` : ''})
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant={previewTab === 'excluded' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setPreviewTab('excluded')}
+                >
+                  Excluded ({parseResult.excluded.length})
                 </Button>
                 <Button
                   type="button"
@@ -841,6 +1462,8 @@ export function QuotationImportWizard({
                         <TableHead>Classification</TableHead>
                         <TableHead>Leaf</TableHead>
                         <TableHead>Size</TableHead>
+                        <TableHead>Hardware</TableHead>
+                        <TableHead>Comments</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -855,6 +1478,12 @@ export function QuotationImportWizard({
                           <TableCell className="text-xs">{g.classification ?? '—'}</TableCell>
                           <TableCell className="text-xs">{g.leaf ?? '—'}</TableCell>
                           <TableCell className="font-mono text-xs">{g.door_size ?? '—'}</TableCell>
+                          <TableCell>
+                            <HardwareCell hardware={g.hardware} headers={hwHeaders} prepValues={g.prep_values} />
+                          </TableCell>
+                          <TableCell>
+                            <CommentsCell doors={g.source_rows.map((row) => doorByRow.get(row))} />
+                          </TableCell>
                           <TableCell className="font-mono text-xs text-right font-semibold">
                             {g.door_qty}
                           </TableCell>
@@ -873,6 +1502,9 @@ export function QuotationImportWizard({
                         <TableHead>Room Name</TableHead>
                         <TableHead>Classification</TableHead>
                         <TableHead>Leaf</TableHead>
+                        <TableHead>Size</TableHead>
+                        <TableHead>Hardware</TableHead>
+                        <TableHead>Comments</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -880,13 +1512,133 @@ export function QuotationImportWizard({
                       {parseResult.doors.slice(0, 200).map((d) => (
                         <TableRow key={`${d.source_row}-${d.door_ref}`}>
                           <TableCell className="font-mono text-xs">{d.source_row}</TableCell>
-                          <TableCell className="text-xs">{d.door_ref}</TableCell>
+                          <TableCell className="text-xs">
+                            {d.door_ref}
+                            {d.variation && (
+                              <span className="ml-1 inline-block border border-green-700 bg-green-50 px-1 text-[10px] font-semibold uppercase text-green-800">
+                                Variation
+                              </span>
+                            )}
+                          </TableCell>
                           <TableCell className="text-xs font-medium">{d.room_name}</TableCell>
                           <TableCell className="text-xs">{d.classification ?? '—'}</TableCell>
                           <TableCell className="text-xs">{d.leaf ?? '—'}</TableCell>
+                          <TableCell className="font-mono text-xs">{d.door_size ?? '—'}</TableCell>
+                          <TableCell>
+                            <HardwareCell hardware={d.hardware} headers={hwHeaders} prepValues={d.prep_values} />
+                          </TableCell>
+                          <TableCell>
+                            <CommentsCell doors={[d]} />
+                          </TableCell>
                           <TableCell className="font-mono text-xs text-right">{d.qty}</TableCell>
                         </TableRow>
                       ))}
+                    </TableBody>
+                  </Table>
+                )}
+
+                {previewTab === 'variation' && (
+                  <Table data-testid="variation-table">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Row</TableHead>
+                        <TableHead>Door Ref</TableHead>
+                        <TableHead>Room Name</TableHead>
+                        <TableHead>Door Specs</TableHead>
+                        <TableHead>Hardware</TableHead>
+                        <TableHead className="text-right">Qty</TableHead>
+                        <TableHead>Door Group</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {variationDetails.map(({ v, door, group, existing, others, excludedReason, status }) => (
+                        <TableRow key={v.row} className={status === 'added' ? '' : 'text-neutral-400'}>
+                          <TableCell className="font-mono text-xs">{v.row}</TableCell>
+                          <TableCell className="text-xs">{v.rawRef}</TableCell>
+                          <TableCell className="text-xs font-medium">{v.room_name}</TableCell>
+                          <TableCell className="font-mono text-xs">
+                            {door ? [door.classification, door.leaf, door.door_size].filter(Boolean).join(' · ') : '—'}
+                          </TableCell>
+                          <TableCell>
+                            <HardwareCell hardware={door?.hardware} headers={hwHeaders} prepValues={door?.prep_values} />
+                          </TableCell>
+                          <TableCell className="font-mono text-xs text-right">{v.qty ?? '—'}</TableCell>
+                          <TableCell className="text-xs">
+                            {status === 'added' && group ? (
+                              existing ? (
+                                <span>
+                                  Added to existing group #{group.position} {group.room_name}{' '}
+                                  <span className="text-neutral-500">
+                                    ({others} → {group.door_qty} doors)
+                                  </span>
+                                </span>
+                              ) : (
+                                <span className="font-semibold text-green-800">
+                                  New door group #{group.position} {group.room_name}{' '}
+                                  <span className="font-normal text-neutral-500">(matched to a set in the next step)</span>
+                                </span>
+                              )
+                            ) : status === 'removed' ? (
+                              <span className="font-semibold text-red-700">
+                                Excluded (red row) — not counted{v.qty ? '; can be included back in Excluded' : ''}
+                              </span>
+                            ) : status === 'excluded' ? (
+                              <span>Excluded — {excludedReason}</span>
+                            ) : (
+                              <span>Not counted (no QTY)</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+
+                {previewTab === 'excluded' && (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Row</TableHead>
+                        <TableHead>Ref</TableHead>
+                        <TableHead>Room Name</TableHead>
+                        <TableHead>Why</TableHead>
+                        <TableHead className="text-right">Qty</TableHead>
+                        <TableHead>Include</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {parseResult.excluded.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center text-xs text-neutral-500 py-6">
+                            No rows were excluded.
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        parseResult.excluded.map((e) => (
+                          <TableRow key={e.row}>
+                            <TableCell className="font-mono text-xs">{e.row}</TableCell>
+                            <TableCell className="text-xs">{e.rawRef}</TableCell>
+                            <TableCell className="text-xs font-medium">{e.room_name || '—'}</TableCell>
+                            <TableCell className="text-xs text-neutral-600">{e.reason}</TableCell>
+                            <TableCell className="font-mono text-xs text-right">{e.qty ?? '—'}</TableCell>
+                            <TableCell>
+                              {e.door ? (
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Include row ${e.row}`}
+                                  checked={parseResult.includedRows.includes(e.row)}
+                                  onChange={() => toggleIncludedRow(e.row)}
+                                  className="h-3.5 w-3.5 accent-neutral-950"
+                                />
+                              ) : (
+                                <span className="text-[11px] text-neutral-400" title="No QTY on this row">
+                                  —
+                                </span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      )}
                     </TableBody>
                   </Table>
                 )}
@@ -942,12 +1694,24 @@ export function QuotationImportWizard({
                 <div className="font-medium text-neutral-950">
                   {lowConfidenceAutoCount} low-confidence match
                   {lowConfidenceAutoCount === 1 ? '' : 'es'} (below{' '}
-                  {Math.round(AUTO_MATCH_THRESHOLD * 100)}%) must be checked one by one: use
-                  Confirm in the row, or pick a different set.
+                  {Math.round(AUTO_MATCH_THRESHOLD * 100)}%) need checking: use Confirm in the
+                  row, pick a different set, or Confirm All Auto.
                 </div>
               )}
             </div>
             <div className="flex items-center gap-2">
+              {selectedForMerge.size > 0 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={selectedMergeItems.length < 2}
+                  onClick={() => setDraftMergePlan(planDraftMerge(selectedMergeItems.map((m) => m.group)))}
+                  title={selectedMergeItems.length < 2 ? 'Tick at least two door groups' : undefined}
+                >
+                  <Merge className="h-3.5 w-3.5" />
+                  <span>Merge {selectedMergeItems.length} groups</span>
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="outline"
@@ -967,6 +1731,17 @@ export function QuotationImportWizard({
               >
                 <CheckCheck className="h-3.5 w-3.5" />
                 <span>Confirm Auto Matches ({highConfidenceAutoCount})</span>
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={allAutoWithSetCount === 0}
+                onClick={confirmEveryAuto}
+                title="Confirms every AUTO match, including low-confidence ones"
+              >
+                <CheckCheck className="h-3.5 w-3.5" />
+                <span>Confirm All Auto ({allAutoWithSetCount})</span>
               </Button>
             </div>
           </div>
@@ -1006,6 +1781,57 @@ export function QuotationImportWizard({
             </div>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2" data-testid="matching-filter">
+            <div className="relative w-full max-w-xs">
+              <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-neutral-400" />
+              <Input
+                aria-label="Filter door groups"
+                placeholder="Filter door groups (room, tag, size, hardware, set)…"
+                value={groupFilter}
+                onChange={(e) => setGroupFilter(e.target.value)}
+                className="h-8 pl-8 text-xs"
+              />
+            </div>
+            <select
+              aria-label="Filter by status"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
+              className="h-8 border border-neutral-300 bg-white px-2 text-xs text-neutral-950 focus:outline-none focus:ring-1 focus:ring-neutral-950"
+            >
+              <option value="ALL">All statuses</option>
+              <option value="unmatched">Unmatched</option>
+              <option value="auto">Auto</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="manual">Manual</option>
+            </select>
+            {(groupFilter || statusFilter !== 'ALL') && (
+              <>
+                <span className="text-xs text-neutral-600">
+                  Showing {visibleMatches.length} of {draftMatches.length}
+                </span>
+                <button
+                  type="button"
+                  className="text-xs text-neutral-600 underline hover:text-neutral-950"
+                  onClick={() => {
+                    setGroupFilter('')
+                    setStatusFilter('ALL')
+                  }}
+                >
+                  Clear
+                </button>
+              </>
+            )}
+          </div>
+
+          <MergeDraftGroupsDialog
+            open={draftMergePlan !== null}
+            onOpenChange={(open) => {
+              if (!open) setDraftMergePlan(null)
+            }}
+            plan={draftMergePlan}
+            onConfirm={confirmDraftMerge}
+          />
+
           <div className="max-h-96 overflow-y-auto border border-neutral-200">
             <Table>
               <TableHeader>
@@ -1017,10 +1843,18 @@ export function QuotationImportWizard({
                   <TableHead>Status</TableHead>
                   <TableHead>Standard Set</TableHead>
                   <TableHead>Score &amp; Reason</TableHead>
+                  <TableHead>Comments</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {draftMatches.map((item) => {
+                {visibleMatches.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={8} className="py-6 text-center text-xs text-neutral-500">
+                      No door groups match the filter.
+                    </TableCell>
+                  </TableRow>
+                )}
+                {visibleMatches.map((item) => {
                   const g = item.group
                   const topCandidates =
                     candidateMap.get(g.group_key)?.topCandidates ?? []
@@ -1029,7 +1863,20 @@ export function QuotationImportWizard({
 
                   return (
                     <TableRow key={g.group_key}>
-                      <TableCell className="font-mono text-xs">{g.position}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        <span className="flex items-center gap-1.5">
+                          {!item.carriedFromGroupId && (
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 accent-neutral-950"
+                              checked={selectedForMerge.has(g.group_key)}
+                              onChange={() => toggleMergeSelect(g.group_key)}
+                              aria-label={`Select ${g.room_name} to merge`}
+                            />
+                          )}
+                          {g.position}
+                        </span>
+                      </TableCell>
                       <TableCell className="font-mono text-xs font-semibold">
                         {g.door_tag || '—'}
                       </TableCell>
@@ -1042,6 +1889,23 @@ export function QuotationImportWizard({
                             ' · ',
                           )}
                         </div>
+                        {g.hardware && (
+                          <div className="mt-0.5">
+                            <HardwareCell hardware={g.hardware} headers={hwHeaders} prepValues={g.prep_values} className="text-neutral-500" />
+                          </div>
+                        )}
+                        {item.mergedFrom && item.mergedFrom.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => unmergeDraft(g.group_key)}
+                            className="mt-1 inline-flex items-center gap-1 rounded border border-neutral-300 bg-white px-1.5 py-px text-[10px] font-semibold text-neutral-700 hover:bg-neutral-50"
+                            title={`Merged from ${item.mergedFrom.map((p) => `${p.group.room_name} (${p.group.door_qty})`).join(', ')}`}
+                            aria-label={`Unmerge ${g.room_name}`}
+                          >
+                            <Split className="h-2.5 w-2.5" />
+                            Unmerge
+                          </button>
+                        )}
                       </TableCell>
                       <TableCell className="font-mono text-xs text-right font-semibold">
                         {g.door_qty}
@@ -1065,7 +1929,7 @@ export function QuotationImportWizard({
                             aria-label={`Standard Set for ${g.room_name}`}
                             value={
                               item.matchStatus === 'manual' && !item.matchedSetId
-                                ? CUSTOM_SET_VALUE
+                                ? (savedCustomValue(item.customGroupName) ?? CUSTOM_SET_VALUE)
                                 : item.matchedSetId ?? ''
                             }
                             onChange={(e) =>
@@ -1077,6 +1941,15 @@ export function QuotationImportWizard({
                             <option value={CUSTOM_SET_VALUE}>
                               Custom (Type door group...)
                             </option>
+                            {savedCustomNames.length > 0 && (
+                              <optgroup label="Custom Door Groups (this project)">
+                                {savedCustomNames.map((name) => (
+                                  <option key={name} value={SAVED_CUSTOM_PREFIX + name}>
+                                    Custom: {name}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
                             {topCandidates.length > 0 && (
                               <optgroup label="Recommended Matches">
                                 {topCandidates.map((c) => (
@@ -1121,6 +1994,18 @@ export function QuotationImportWizard({
                           </span>
                         )}
                         <span>{item.matchReason || '—'}</span>
+                        {(sizedLinesByGroup.get(g.group_key)?.flagNotes.length ?? 0) > 0 && (
+                          <div className="mt-1 text-[11px] text-neutral-700">
+                            <span className="font-semibold">From the schedule:</span>{' '}
+                            {sizedLinesByGroup.get(g.group_key)?.flagNotes.join('; ')}
+                          </div>
+                        )}
+                        {(sizedLinesByGroup.get(g.group_key)?.notes.length ?? 0) > 0 && (
+                          <div className="mt-1 text-[11px] text-neutral-700">
+                            <span className="font-semibold">Sized for {g.door_size}:</span>{' '}
+                            {sizedLinesByGroup.get(g.group_key)?.notes.join('; ')}
+                          </div>
+                        )}
                         {item.matchStatus === 'auto' &&
                           item.matchedSetId &&
                           !isHighConfidenceAuto(item) && (
@@ -1135,6 +2020,9 @@ export function QuotationImportWizard({
                               Confirm
                             </Button>
                           )}
+                      </TableCell>
+                      <TableCell>
+                        <CommentsCell doors={g.source_rows.map((row) => doorByRow.get(row))} />
                       </TableCell>
                     </TableRow>
                   )
@@ -1155,9 +2043,16 @@ export function QuotationImportWizard({
                 Project
               </div>
               <div className="text-sm font-bold text-neutral-950">{projectName}</div>
+              {!isReimport && (
+                <div className="text-xs text-neutral-800">
+                  Builder: <span className="font-semibold">{builderName.trim()}</span>
+                  <br />
+                  First sheet: <span className="font-semibold">{supplier?.name}</span>
+                </div>
+              )}
               <div className="text-xs text-neutral-600">
                 {!isReimport
-                  ? 'Creates version 1 (draft) with the matched hardware lines.'
+                  ? 'Creates version 1 (draft) of the quote with the matched hardware lines.'
                   : replacesDraft
                     ? `Replaces the quotation in draft v${baseVersion?.version_no}.`
                     : `Creates v${nextVersionNo} (draft); v${baseVersion?.version_no} is kept in the history.`}
@@ -1177,6 +2072,11 @@ export function QuotationImportWizard({
                 <div>Parsed Rows: {parseResult.doors.length}</div>
                 <div>Total Door Qty: {parseResult.totalDoorQty}</div>
                 <div>Excluded Rows: {parseResult.excludedCount}</div>
+                {variationAdded > 0 && <div>Added in Variation: {variationAdded}</div>}
+                {parseResult.includedRows.length > 0 && (
+                  <div>Included Back: {parseResult.includedRows.length}</div>
+                )}
+                {parseResult.sheetQtyTotal != null && <div>Sheet QTY Total: {parseResult.sheetQtyTotal}</div>}
               </div>
             </div>
 
@@ -1190,6 +2090,9 @@ export function QuotationImportWizard({
                 <div>Matched to Standard Set: {matchedCount}</div>
                 <div>Custom Door Groups: {customCount}</div>
                 <div>Hardware Lines: {totalCopiedLines}</div>
+                <div>Groups Sized for Door: {sizedGroupCount}</div>
+                <div>Lines Added from Schedule: {addedLineCount}</div>
+                <div>Lines Flagged to Check: {flaggedLineCount}</div>
                 {isReimport && <div>Kept From v{baseVersion?.version_no}: {keptCount}</div>}
               </div>
             </div>

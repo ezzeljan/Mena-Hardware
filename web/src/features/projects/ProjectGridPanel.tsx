@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   Check,
   Download,
   Loader2,
+  Merge,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
+import { GridSkeleton } from '@/components/ui/skeleton'
 import { fetchAllRows } from '@/lib/fetchAll'
 import { formatCurrency } from '@/lib/utils'
 import { parseNullablePriceInput } from '@/lib/schemas'
@@ -15,6 +18,7 @@ import type {
   Part,
   ProjectLine,
   ProjectVersion,
+  QuoteSheet,
 } from '@/types/database'
 import { fetchVersionGroups, fetchVersionLines } from '@/features/projects/projectData'
 import { GridCellEditor } from '@/features/projects/GridCellEditor'
@@ -24,19 +28,26 @@ import {
   GroupRowsFragment,
   LAST_EDITABLE_COL,
   type EditableCol,
-  type LineManufacturer,
+  type LineSupplier,
 } from '@/features/projects/ProjectGridGroupRows'
 import { DELIVERY_PER_DOOR } from '@/features/projects/pricing'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { MergeGroupsDialog } from '@/features/projects/MergeGroupsDialog'
+import { planMerge, type MergePlan } from '@/features/projects/mergeGroups'
 
 interface ProjectGridPanelProps {
   /** Display name with reference no. (file name, title strip). */
   projectName: string
   /** Project name without the reference no. ("Project:" row of the export). */
   projectTitle?: string
+  /** The quote's builder ("Client:" row and file name). */
   clientName: string
   activeVersion: ProjectVersion | null
+  /** The supplier sheet shown (its lines only). */
+  sheet: QuoteSheet | null
+  /** Every sheet of the version (the export writes one worksheet each). */
+  sheets?: QuoteSheet[]
   canEdit: boolean
   /** PM comment count per door group (shown on the group rows). */
   commentCounts?: Map<string, number>
@@ -49,6 +60,12 @@ interface ProjectGridPanelProps {
    * nothing is left unsaved. Used to save before submitting (B6).
    */
   onRegisterSavePending?: (savePending: (() => Promise<boolean>) | null) => void
+  /** Shown under the grid in a bar pinned to the bottom of the screen (the sheet tabs). */
+  footer?: ReactNode
+  /** Where the Export Excel button is drawn (the page's button row). */
+  exportSlot?: HTMLElement | null
+  /** The version's sheets are still loading (lines are shown per sheet). */
+  sheetsLoading?: boolean
 }
 
 type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error'
@@ -58,17 +75,74 @@ export function ProjectGridPanel({
   projectTitle,
   clientName,
   activeVersion,
+  sheet,
+  sheets = [],
   canEdit,
   commentCounts,
   onOpenComments,
   highlightGroupId = null,
   onRegisterSavePending,
+  footer,
+  exportSlot = null,
+  sheetsLoading = false,
 }: ProjectGridPanelProps) {
   const queryClient = useQueryClient()
+
+  // The grid's visible horizontal scrollbar lives in the bar pinned to the
+  // bottom of the screen (with the sheet tabs). The grid still scrolls
+  // sideways natively (trackpad, Shift + wheel, touch), but its own scrollbar
+  // is clipped off (hBarHeight), so there's never a second one on screen.
+  const gridScrollRef = useRef<HTMLDivElement | null>(null)
+  // Also kept in state so the observers attach once the grid is on screen.
+  const [gridEl, setGridEl] = useState<HTMLDivElement | null>(null)
+  const setGridScroll = useCallback((el: HTMLDivElement | null) => {
+    gridScrollRef.current = el
+    setGridEl(el)
+  }, [])
+  const hScrollRef = useRef<HTMLDivElement>(null)
+  const [hScrollWidth, setHScrollWidth] = useState(0)
+  const [showHScroll, setShowHScroll] = useState(false)
+  // Height of the grid's own horizontal scrollbar (0 for overlay scrollbars).
+  const [hBarHeight, setHBarHeight] = useState(0)
+  const measureScroll = useCallback(() => {
+    const grid = gridScrollRef.current
+    if (!grid) {
+      setShowHScroll(false)
+      return
+    }
+    const overflow = grid.scrollWidth - grid.clientWidth
+    const proxyWidth = hScrollRef.current?.clientWidth || grid.clientWidth
+    setHScrollWidth(proxyWidth + Math.max(0, overflow))
+    setShowHScroll(overflow > 0)
+    // The box has no border, so what's left of offsetHeight is the scrollbar.
+    setHBarHeight(overflow > 0 ? Math.max(0, grid.offsetHeight - grid.clientHeight) : 0)
+  }, [])
+  useEffect(() => {
+    measureScroll()
+    window.addEventListener('resize', measureScroll)
+    const ro = new ResizeObserver(measureScroll)
+    if (gridEl) {
+      ro.observe(gridEl)
+      const table = gridEl.firstElementChild
+      if (table) ro.observe(table)
+    }
+    return () => {
+      window.removeEventListener('resize', measureScroll)
+      ro.disconnect()
+    }
+  }, [gridEl, measureScroll])
+  useEffect(() => {
+    if (showHScroll && hScrollRef.current && gridScrollRef.current) {
+      hScrollRef.current.scrollLeft = gridScrollRef.current.scrollLeft
+    }
+  }, [showHScroll])
   const isDraft = activeVersion?.status === 'draft'
   const editable = canEdit && isDraft
 
+  // Lines of every sheet of the version (edits are saved by line id).
   const [lines, setLines] = useState<ProjectLine[]>([])
+  // Part suggestions: the sheet's supplier only, or every supplier (out of stock).
+  const [allSuppliers, setAllSuppliers] = useState(false)
   const [markupPct, setMarkupPct] = useState<number>(15)
   const [markupInput, setMarkupInput] = useState<string>('15.00')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved')
@@ -115,7 +189,7 @@ export function ProjectGridPanel({
         supabase
           .from('parts')
           .select(
-            'id, sku, manufacturer_id, description, unit_cost, active, created_at, updated_at, manufacturers(id, name, is_owner_supplied)',
+            'id, sku, supplier_id, description, unit_cost, active, folder_id, legend, created_at, updated_at, suppliers(id, name, is_owner_supplied)',
           )
           .eq('active', true)
           .order('sku', { ascending: true })
@@ -125,6 +199,11 @@ export function ProjectGridPanel({
   })
 
   const parts = useMemo(() => partsQuery.data ?? [], [partsQuery.data])
+  const sheetSupplierId = sheet?.supplier_id ?? null
+  const suggestedParts = useMemo(
+    () => (allSuppliers || !sheetSupplierId ? parts : parts.filter((p) => p.supplier_id === sheetSupplierId)),
+    [allSuppliers, parts, sheetSupplierId],
+  )
   const partLookups = useMemo(
     () => ({
       partById: new Map(parts.map((p) => [p.id, p])),
@@ -133,12 +212,19 @@ export function ProjectGridPanel({
     [parts],
   )
 
+  // The version whose lines are in `lines`. The lines reach state one render
+  // after the query, so until this matches the version the grid keeps its
+  // skeleton (instead of flashing door groups without their parts).
+  const [linesVersionId, setLinesVersionId] = useState<string | null>(null)
+  const versionId = activeVersion?.id ?? null
   useEffect(() => {
-    if (projectLinesQuery.data && dirtyIdsRef.current.size === 0) {
+    if (!projectLinesQuery.data) return
+    if (dirtyIdsRef.current.size === 0) {
       setLines(projectLinesQuery.data)
       linesRef.current = projectLinesQuery.data
     }
-  }, [projectLinesQuery.data])
+    setLinesVersionId(versionId)
+  }, [projectLinesQuery.data, versionId])
 
   useEffect(() => {
     linesRef.current = lines
@@ -167,6 +253,7 @@ export function ProjectGridPanel({
           origin: line.origin,
           part_id: line.part_id,
           mhqt_remarks: line.mhqt_remarks ?? '',
+          review_flag: line.review_flag ?? '',
         },
       ]
     })
@@ -217,6 +304,33 @@ export function ProjectGridPanel({
     return () => onRegisterSavePending?.(null)
   }, [onRegisterSavePending, savePendingEdits])
 
+  // Merge / unmerge door groups (merge_door_groups / unmerge_door_group).
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set())
+  const [mergeOpen, setMergeOpen] = useState(false)
+  const [mergeBusy, setMergeBusy] = useState(false)
+  const [mergeError, setMergeError] = useState<string | null>(null)
+  // Worked out when the dialog opens (the ticked groups and their lines then).
+  const [mergePlan, setMergePlan] = useState<MergePlan | null>(null)
+  // A new version or sheet starts with nothing selected.
+  useEffect(() => setSelectedGroupIds(new Set()), [activeVersion?.id])
+  const toggleGroupSelected = useCallback((groupId: string) => {
+    setSelectedGroupIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(groupId)) next.delete(groupId)
+      else next.add(groupId)
+      return next
+    })
+  }, [])
+  const refreshGroups = useCallback(async () => {
+    const vid = activeVersion?.id
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['door_groups', vid] }),
+      queryClient.invalidateQueries({ queryKey: ['project_lines', vid] }),
+      queryClient.invalidateQueries({ queryKey: ['version_comments', vid] }),
+      queryClient.invalidateQueries({ queryKey: ['project', activeVersion?.project_id] }),
+    ])
+  }, [activeVersion?.id, activeVersion?.project_id, queryClient])
+
   // Warn before closing the tab while edits are still unsaved.
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
@@ -254,10 +368,15 @@ export function ProjectGridPanel({
     [flushDirtyLines],
   )
 
+  const sheetLines = useMemo(
+    () => (sheet ? lines.filter((l) => l.sheet_id === sheet.id) : []),
+    [lines, sheet],
+  )
+
   const linesByGroup = useMemo(() => {
     const map = new Map<string, ProjectLine[]>()
     for (const g of groups) map.set(g.id, [])
-    for (const l of lines) {
+    for (const l of sheetLines) {
       const arr = map.get(l.group_id)
       if (arr) arr.push(l)
     }
@@ -265,7 +384,7 @@ export function ProjectGridPanel({
       arr.sort((a, b) => a.position - b.position)
     }
     return map
-  }, [groups, lines])
+  }, [groups, sheetLines])
 
   const flatLineIds = useMemo(() => {
     const ordered: string[] = []
@@ -392,7 +511,7 @@ export function ProjectGridPanel({
   )
 
   const handleAddLine = async (groupId: string) => {
-    if (!editable) return
+    if (!editable || !sheet) return
     setSaveStatus('saving')
     setSaveError(null)
     const groupLines = linesByGroup.get(groupId) ?? []
@@ -405,6 +524,7 @@ export function ProjectGridPanel({
       .from('project_lines')
       .insert({
         group_id: groupId,
+        sheet_id: sheet.id,
         position: nextPos,
         sku: '',
         description: 'New hardware item',
@@ -414,7 +534,7 @@ export function ProjectGridPanel({
         part_id: null,
       })
       .select(
-        'id, group_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, created_at, updated_at',
+        'id, group_id, sheet_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, review_flag, created_at, updated_at',
       )
       .single()
 
@@ -429,6 +549,13 @@ export function ProjectGridPanel({
     setSaveStatus('saved')
     focusCell(created.id, 0)
     startEditing(created, 0)
+  }
+
+  // The estimator has checked a flagged line: clear the flag (saved like any edit).
+  const handleClearFlag = (line: ProjectLine) => {
+    if (!editable) return
+    setLines((prev) => prev.map((l) => (l.id === line.id ? { ...l, review_flag: '' } : l)))
+    scheduleAutosave(line.id)
   }
 
   const handleDeleteLine = async (line: ProjectLine) => {
@@ -493,6 +620,12 @@ export function ProjectGridPanel({
     }
   }
 
+  // Switching sheets closes any open cell editor.
+  useEffect(() => {
+    setEditingCell(null)
+    setFocusedCell(null)
+  }, [sheet?.id])
+
   useEffect(() => {
     setEditingCell(null)
     setFocusedCell(null)
@@ -507,7 +640,7 @@ export function ProjectGridPanel({
     }
   }, [activeVersion])
 
-  // LEGEND / MANUFACTURER columns: from the line's library part (by id, else SKU).
+  // LEGEND / SUPPLIER columns: from the line's library part (by id, else SKU).
   // Built once per parts load (hooks must stay above the early return).
   const { partById, partBySku } = partLookups
 
@@ -515,8 +648,50 @@ export function ProjectGridPanel({
 
   const markupFactor = 1 + markupPct / 100
   const totalDoors = groups.reduce((sum, g) => sum + Number(g.door_qty), 0)
+
+  const selectedGroups = groups.filter((g) => selectedGroupIds.has(g.id))
+  const sheetNameOf = (sheetId: string) => sheets.find((x) => x.id === sheetId)?.name ?? 'Sheet'
+
+  const handleMerge = async (roomName: string, include: Set<string>) => {
+    if (!mergePlan) return
+    setMergeBusy(true)
+    setMergeError(null)
+    try {
+      if (!(await savePendingEdits())) throw new Error('Save the pending edits first (see the error above).')
+      const { keep, copy } = mergePlan.resolve(include)
+      const { error } = await supabase.rpc('merge_door_groups', {
+        p_target: mergePlan.target.id,
+        p_others: mergePlan.others.map((g) => g.id),
+        p_room_name: roomName,
+        p_keep_line_ids: keep,
+        p_copy_line_ids: copy,
+      })
+      if (error) throw error
+      setMergeOpen(false)
+      setSelectedGroupIds(new Set())
+      await refreshGroups()
+    } catch (err) {
+      setMergeError((err as Error).message)
+    } finally {
+      setMergeBusy(false)
+    }
+  }
+
+  const handleUnmerge = async (group: DoorGroup) => {
+    const parts = group.merged_from ?? []
+    const list = parts.map((p) => `${p.room_name} (${Number(p.door_qty)})`).join(', ')
+    if (!window.confirm(`Unmerge into ${parts.length} door groups: ${list}? Each keeps this group's current hardware.`)) return
+    setSaveError(null)
+    if (!(await savePendingEdits())) return
+    const { error } = await supabase.rpc('unmerge_door_group', { p_group: group.id })
+    if (error) {
+      setSaveError(error.message)
+      return
+    }
+    await refreshGroups()
+  }
   const groupById = new Map(groups.map((g) => [g.id, g]))
-  const projectTotal = lines.reduce((sum, l) => {
+  const projectTotal = sheetLines.reduce((sum, l) => {
     if (l.unit_price === null) return sum
     const dQty = Number(groupById.get(l.group_id)?.door_qty ?? 0)
     return sum + Number(l.qty_per_door) * dQty * Number(l.unit_price)
@@ -525,12 +700,33 @@ export function ProjectGridPanel({
   const deliveries = totalDoors * DELIVERY_PER_DOOR
   const totalExGst = projectTotalWithMarkup + deliveries
 
-  const manufacturerOf = (line: ProjectLine): LineManufacturer | null => {
+  const supplierOf = (line: ProjectLine): LineSupplier | null => {
     const part =
       (line.part_id ? partById.get(line.part_id) : undefined) ??
       partBySku.get(line.sku.trim().toUpperCase())
-    const m = part?.manufacturers
-    return m ? { name: m.name, ownerSupplied: m.is_owner_supplied } : null
+    const m = part?.suppliers
+    return m
+      ? {
+          name: m.name,
+          ownerSupplied: m.is_owner_supplied,
+          legend: part.legend || (m.is_owner_supplied ? 'MM' : ''),
+          // Owner-supplied (MM) parts belong on every supplier's sheet: never flagged.
+          other: !!sheetSupplierId && part.supplier_id !== sheetSupplierId && !m.is_owner_supplied,
+        }
+      : null
+  }
+
+  // Part suggestions for a line: its own folder first (the sheet supplier's parts
+  // before others'), then the rest of the suggested parts.
+  const suggestionsFor = (line: ProjectLine): Part[] => {
+    const current =
+      (line.part_id ? partById.get(line.part_id) : undefined) ??
+      partBySku.get(line.sku.trim().toUpperCase())
+    const folderId = current?.folder_id
+    if (!folderId) return suggestedParts
+    const rank = (p: Part) =>
+      p.folder_id === folderId ? (p.supplier_id === sheetSupplierId ? 0 : 1) : 2
+    return [...suggestedParts].sort((a, b) => rank(a) - rank(b))
   }
 
   const renderEditableCell = (
@@ -550,7 +746,8 @@ export function ProjectGridPanel({
           key={`${line.id}:${col}`}
           initialValue={editingCell.initial}
           isSku={col === 0}
-          parts={parts}
+          parts={col === 0 ? suggestionsFor(line) : suggestedParts}
+          showSupplier={allSuppliers}
           alignRight={alignRight}
           onCommit={(value, move) => {
             commitEdit(line, col, value)
@@ -617,7 +814,103 @@ export function ProjectGridPanel({
     )
   }
 
+  // Header values over the grid columns, as in the Excel file (rows 2-4).
+  // Columns: 8 DESCRIPTION, 9 QTY, 10 COST, 11 COST DOOR, 13 PRICE DOOR,
+  // 14 HW PRICE PER DOOR TYPE, 15 OVERALL HW PRICE PER TYPICAL DOOR.
+  const label = (text: string, align: 'right' | 'center' = 'center') => (
+    <div className={`text-[11px] font-bold uppercase text-neutral-600 ${align === 'right' ? 'text-right' : 'text-center'}`}>
+      {text}
+    </div>
+  )
+  const money = (value: number, className = '', testId?: string) => (
+    <div className={`px-1.5 py-0.5 text-right font-mono font-bold text-neutral-950 ${className}`} data-testid={testId}>
+      {formatCurrency(value)}
+    </div>
+  )
+  const summaryCell = (row: number, col: number): ReactNode => {
+    const at = `${row}:${col}`
+    switch (at) {
+      case '0:10':
+        return label('Markup')
+      case '1:10':
+        return (
+          <label
+            htmlFor="grid-markup-input"
+            className="flex items-center justify-end border-2 border-neutral-950 bg-sky-50 px-1.5 py-0.5"
+            aria-label="Markup"
+          >
+            <input
+              id="grid-markup-input"
+              type="text"
+              inputMode="decimal"
+              disabled={!editable}
+              value={markupInput}
+              onChange={(e) => setMarkupInput(e.target.value)}
+              onBlur={async () => {
+                const n = Number(markupInput.replace('%', '').trim())
+                if (Number.isFinite(n) && n >= 0) {
+                  const rounded = Math.round(n * 100) / 100
+                  setMarkupPct(rounded)
+                  setMarkupInput(rounded.toFixed(2))
+                  if (activeVersion && editable) {
+                    setSaveStatus('saving')
+                    const { error } = await supabase
+                      .from('project_versions')
+                      .update({ markup_pct: rounded })
+                      .eq('id', activeVersion.id)
+                    if (error) {
+                      setSaveStatus('error')
+                      setSaveError(error.message)
+                    } else {
+                      setSaveStatus('saved')
+                      await queryClient.invalidateQueries({
+                        queryKey: ['project', activeVersion.project_id],
+                      })
+                    }
+                  }
+                } else {
+                  setMarkupInput(markupPct.toFixed(2))
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.currentTarget.blur()
+                }
+              }}
+              className="w-14 text-right font-mono font-bold text-neutral-950 focus:outline-none disabled:bg-transparent"
+            />
+            <span className="font-mono font-bold text-neutral-700 ml-0.5">%</span>
+          </label>
+        )
+      case '0:11':
+        return label('Total cost')
+      case '1:11':
+        return money(projectTotal, 'bg-orange-100')
+      case '0:13':
+        return label('Total + markup')
+      case '1:13':
+        return money(projectTotalWithMarkup)
+      case '0:15':
+        return label('Total ex. GST')
+      case '1:14':
+        return label('Incl. deliveries / excl. GST', 'right')
+      case '1:15':
+        return money(totalExGst, 'border border-neutral-950 bg-sky-100', 'grid-total-ex-gst')
+      case '2:8':
+        return <div className="text-right text-[11px] font-bold uppercase text-sky-900">Overall door qty:</div>
+      case '2:9':
+        return <div className="text-right font-mono font-bold text-neutral-950" data-testid="grid-overall-door-qty">{totalDoors}</div>
+      case '2:14':
+        return label('Deliveries', 'right')
+      case '2:15':
+        return money(deliveries, 'bg-sky-50')
+      default:
+        return null
+    }
+  }
+
   return (
+    <div>
     <div className="space-y-3">
       {saveError && (
         <div
@@ -639,32 +932,69 @@ export function ProjectGridPanel({
         </div>
       )}
 
-      {groups.length === 0 ? (
+      {/* Skeleton until the groups, their lines, the sheets (lines show per
+          sheet) and the parts (LEGEND / MANUFACTURER) are all in, so the grid
+          appears once, complete. */}
+      {sheetsLoading ||
+      groupsQuery.isLoading ||
+      projectLinesQuery.isLoading ||
+      partsQuery.isLoading ||
+      (versionId !== null && linesVersionId !== versionId && !projectLinesQuery.isError) ? (
+        <GridSkeleton />
+      ) : groups.length === 0 ? (
         <div className="border border-dashed border-neutral-300 bg-neutral-50 p-8 text-center text-xs text-neutral-600">
           No door groups in this version yet.
         </div>
       ) : (
         <div className="border border-neutral-400 bg-white">
-          {/* Excel-style Workbook Title Strip */}
-          <div className="flex flex-wrap items-center justify-between gap-4 px-3 py-2.5 border-b border-neutral-400 bg-white">
-            {/* Same header rows as the Excel export (rows 2-4); the sheet title
-                and schedule # are only chosen when exporting. */}
-            <div className="space-y-0.5">
-              <div className="text-sm font-bold uppercase text-neutral-600">
-                Project: {(projectTitle || projectName).toUpperCase()}
-              </div>
-              <div className="text-sm font-bold uppercase text-neutral-600">
-                Client: {(clientName || '').toUpperCase()}
-              </div>
-              <div className="text-sm font-bold text-neutral-600">Schedule #:</div>
-              <div className="pt-0.5 text-[11px] text-neutral-500">
-                v{activeVersion.version_no} ({activeVersion.status.toUpperCase()})
-                {editable &&
-                  ' • Arrow keys move, Enter/F2 edit, Tab next, Esc cancel'}
-              </div>
+          {/* Sheet / version, other-supplier toggle and save status. */}
+          <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-1.5 border-b border-neutral-400 bg-white">
+            <div className="text-[11px] text-neutral-500">
+              {sheet ? `Sheet: ${sheet.name} • ` : ''}
+              v{activeVersion.version_no} ({activeVersion.status.toUpperCase()})
+              {editable && ' • Arrow keys move, Enter/F2 edit, Tab next, Esc cancel'}
             </div>
-
             <div className="flex items-center gap-4 text-xs">
+              {editable && selectedGroupIds.size > 0 && (
+                <span className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-7"
+                    disabled={selectedGroups.length < 2}
+                    onClick={() => {
+                      setMergeError(null)
+                      setMergePlan(planMerge(selectedGroups, lines))
+                      setMergeOpen(true)
+                    }}
+                    title={selectedGroups.length < 2 ? 'Tick at least two door groups' : undefined}
+                  >
+                    <Merge className="h-3.5 w-3.5" />
+                    <span>Merge {selectedGroups.length} groups</span>
+                  </Button>
+                  <button
+                    type="button"
+                    className="text-[11px] text-neutral-600 underline hover:text-neutral-950"
+                    onClick={() => setSelectedGroupIds(new Set())}
+                  >
+                    Clear
+                  </button>
+                </span>
+              )}
+              {editable && sheetSupplierId && (
+                <label
+                  className="flex items-center gap-1.5 text-[11px] text-neutral-700 select-none"
+                  title="Part suggestions come from this sheet's supplier. Tick to pick a part from another supplier (e.g. out of stock)."
+                >
+                  <input
+                    type="checkbox"
+                    checked={allSuppliers}
+                    onChange={(e) => setAllSuppliers(e.target.checked)}
+                    data-testid="other-suppliers-toggle"
+                  />
+                  Parts from other suppliers
+                </label>
+              )}
               {editable && (
                 <Badge variant="outline" className="font-mono text-[11px] gap-1.5">
                   {saveStatus === 'saving' && (
@@ -688,106 +1018,12 @@ export function ProjectGridPanel({
                   )}
                 </Badge>
               )}
+            </div>
+          </div>
 
-              <div className="flex items-center border border-neutral-400">
-                <label
-                  htmlFor="grid-markup-input"
-                  className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400"
-                >
-                  MARKUP:
-                </label>
-                <div className="flex items-center px-1.5 py-0.5 bg-white">
-                  <input
-                    id="grid-markup-input"
-                    type="text"
-                    inputMode="decimal"
-                    disabled={!editable}
-                    value={markupInput}
-                    onChange={(e) => setMarkupInput(e.target.value)}
-                    onBlur={async () => {
-                      const n = Number(markupInput.replace('%', '').trim())
-                      if (Number.isFinite(n) && n >= 0) {
-                        const rounded = Math.round(n * 100) / 100
-                        setMarkupPct(rounded)
-                        setMarkupInput(rounded.toFixed(2))
-                        if (activeVersion && editable) {
-                          setSaveStatus('saving')
-                          const { error } = await supabase
-                            .from('project_versions')
-                            .update({ markup_pct: rounded })
-                            .eq('id', activeVersion.id)
-                          if (error) {
-                            setSaveStatus('error')
-                            setSaveError(error.message)
-                          } else {
-                            setSaveStatus('saved')
-                            await queryClient.invalidateQueries({
-                              queryKey: ['project', activeVersion.project_id],
-                            })
-                          }
-                        }
-                      } else {
-                        setMarkupInput(markupPct.toFixed(2))
-                      }
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.currentTarget.blur()
-                      }
-                    }}
-                    className="w-14 text-right font-mono font-bold text-neutral-950 focus:outline-none disabled:bg-transparent"
-                  />
-                  <span className="font-mono font-bold text-neutral-700 ml-0.5">
-                    %
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center border border-neutral-400">
-                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
-                  OVERALL DOOR QTY:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
-                  {totalDoors}
-                </span>
-              </div>
-
-              <div className="flex items-center border border-neutral-400">
-                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
-                  TOTAL COST:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
-                  {formatCurrency(projectTotal)}
-                </span>
-              </div>
-
-              <div className="flex items-center border border-neutral-400">
-                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
-                  TOTAL + MARKUP:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
-                  {formatCurrency(projectTotalWithMarkup)}
-                </span>
-              </div>
-
-              <div className="flex items-center border border-neutral-400">
-                <span className="px-2 py-1 bg-neutral-100 font-semibold text-neutral-700 border-r border-neutral-400">
-                  DELIVERIES:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950">
-                  {formatCurrency(deliveries)}
-                </span>
-              </div>
-
-              <div className="flex items-center border border-neutral-950">
-                <span className="px-2 py-1 bg-sky-100 font-semibold text-neutral-950 border-r border-neutral-950">
-                  TOTAL EX. GST:
-                </span>
-                <span className="px-2.5 py-1 font-mono font-bold text-neutral-950" data-testid="grid-total-ex-gst">
-                  {formatCurrency(totalExGst)}
-                </span>
-              </div>
-
+          {/* The Export button sits in the page's button row (next to Submit). */}
+          {exportSlot &&
+            createPortal(
               <Button
                 type="button"
                 variant="outline"
@@ -800,34 +1036,65 @@ export function ProjectGridPanel({
               >
                 <Download className="h-3.5 w-3.5" />
                 <span>{exporting ? 'Exporting...' : 'Export Excel'}</span>
-              </Button>
-            </div>
-          </div>
+              </Button>,
+              exportSlot,
+            )}
 
           {/*
             Single Connected Excel Grid. It scrolls inside a box that fits the
-            screen, so the horizontal scrollbar and the column headers stay in
-            view instead of only at the bottom / top of a long schedule.
+            screen, so the column headers stay in view. It scrolls sideways
+            natively; its own horizontal scrollbar is pulled under the clipping
+            wrapper (negative margin) and the pinned bottom bar shows one instead.
           */}
+          <div className="overflow-hidden">
           <div
+            ref={setGridScroll}
+            onScroll={(e) => {
+              if (hScrollRef.current && showHScroll) hScrollRef.current.scrollLeft = e.currentTarget.scrollLeft
+            }}
+            style={{ marginBottom: -hBarHeight }}
             className="max-h-[max(18rem,calc(100dvh_-_9rem))] overflow-auto"
             data-testid="hardware-grid-scroll"
           >
           <table className="w-auto border-collapse text-xs">
-            <thead className="sticky top-0 z-10 bg-neutral-200 text-neutral-950 shadow-[0_1px_0_0_#a3a3a3]">
+            <thead className="text-neutral-950">
+              {/*
+                The Excel export's rows 2-4, each value over the same column as
+                in the file: markup over COST, door qty over QTY, total ex. GST
+                and deliveries over OVERALL HW PRICE PER TYPICAL DOOR. These
+                scroll away; the column headers below stay pinned.
+              */}
+              {[0, 1, 2].map((row) => (
+                <tr key={`summary-${row}`} className="bg-white" data-testid="grid-summary-row">
+                  <td colSpan={5} className="px-3 py-1 text-sm font-bold uppercase text-neutral-600 whitespace-nowrap">
+                    {row === 0 && <>Project: {(projectTitle || projectName).toUpperCase()}</>}
+                    {row === 1 && <>Client: {(clientName || '').toUpperCase()}</>}
+                    {row === 2 && <span className="normal-case">Schedule #:</span>}
+                  </td>
+                  {GRID_COLUMNS.slice(5).map((c, i) => {
+                    const col = i + 5
+                    return (
+                      <td key={c.label} className="px-2 py-1 whitespace-nowrap">
+                        {summaryCell(row, col)}
+                      </td>
+                    )
+                  })}
+                  {editable && <td />}
+                </tr>
+              ))}
               <tr>
                 {GRID_COLUMNS.map((c) => (
                   <th
                     key={c.label}
-                    className={`border border-neutral-400 px-2 py-1.5 font-bold uppercase tracking-wider whitespace-nowrap ${
+                    className={`sticky top-0 z-10 border border-neutral-400 px-2 py-1.5 font-bold uppercase tracking-wider whitespace-nowrap shadow-[0_1px_0_0_#a3a3a3] ${
                       c.align === 'right' ? 'text-right' : c.align === 'center' ? 'text-center' : 'text-left'
-                    } ${c.label === 'MHQT REMARKS' ? 'bg-yellow-200' : ''}`}
+                    } ${c.label === 'MHQT REMARKS' ? 'bg-yellow-200' : 'bg-neutral-200'}`}
                   >
                     {c.label}
                   </th>
                 ))}
                 {editable && (
-                  <th className="border border-neutral-400 px-2 py-1.5 text-center font-bold uppercase tracking-wider whitespace-nowrap">
+                  <th className="sticky top-0 z-10 border border-neutral-400 bg-neutral-200 px-2 py-1.5 text-center font-bold uppercase tracking-wider whitespace-nowrap shadow-[0_1px_0_0_#a3a3a3]">
                     ACTIONS
                   </th>
                 )}
@@ -851,7 +1118,7 @@ export function ProjectGridPanel({
                     doorTag={doorTag}
                     groupLines={groupLines}
                     markupFactor={markupFactor}
-                    manufacturerOf={manufacturerOf}
+                    supplierOf={supplierOf}
                     editable={editable}
                     commentCount={commentCounts?.get(group.id) ?? 0}
                     onOpenComments={onOpenComments ? () => onOpenComments(group.id) : undefined}
@@ -859,8 +1126,14 @@ export function ProjectGridPanel({
                     renderEditableCell={renderEditableCell}
                     onAddLine={() => void handleAddLine(group.id)}
                     onDeleteLine={(line) => void handleDeleteLine(line)}
+                    onClearFlag={handleClearFlag}
                     onMoveLine={(line, dir) =>
                       void handleMoveLine(group.id, line, dir)
+                    }
+                    selected={selectedGroupIds.has(group.id)}
+                    onToggleSelect={editable ? () => toggleGroupSelected(group.id) : undefined}
+                    onUnmerge={
+                      editable && (group.merged_from?.length ?? 0) >= 2 ? () => void handleUnmerge(group) : undefined
                     }
                   />
                 )
@@ -868,8 +1141,19 @@ export function ProjectGridPanel({
             </tbody>
           </table>
           </div>
+          </div>
         </div>
       )}
+
+      <MergeGroupsDialog
+        open={mergeOpen}
+        onOpenChange={setMergeOpen}
+        plan={mergePlan}
+        sheetName={sheetNameOf}
+        busy={mergeBusy}
+        error={mergeError}
+        onConfirm={(roomName, include) => void handleMerge(roomName, include)}
+      />
 
       {activeVersion && (
         <ExportExcelDialog
@@ -878,7 +1162,8 @@ export function ProjectGridPanel({
           projectId={activeVersion.project_id}
           busy={exporting}
           error={exportError}
-          onExport={async ({ scheduleNo, sheetTitle }) => {
+          sheets={sheets}
+          onExport={async ({ scheduleNo, sheetTitle, sheetIds }) => {
             setExporting(true)
             setExportError(null)
             try {
@@ -894,6 +1179,14 @@ export function ProjectGridPanel({
                 version: { ...activeVersion, markup_pct: markupPct },
                 groups,
                 lines,
+                // Only the sheets ticked in the dialog.
+                sheets: sheets.filter((s) => sheetIds.includes(s.id)),
+                quoteName: clientName,
+                // One sheet picked out of several: its name goes in the file name.
+                fileSuffix:
+                  sheets.length > 1 && sheetIds.length === 1
+                    ? sheets.find((s) => s.id === sheetIds[0])?.name
+                    : undefined,
                 parts,
               })
               setExportOpen(false)
@@ -905,6 +1198,30 @@ export function ProjectGridPanel({
           }}
         />
       )}
+    </div>
+
+      {/*
+        Pinned to the bottom of the screen while the grid is in view. The
+        negative offset cancels the page area's bottom padding (--page-pad, set
+        in AppShell), since sticky offsets count from it.
+      */}
+      <div
+        className="sticky bottom-[calc(-1*var(--page-pad,0px))] z-20 bg-white"
+        data-testid="grid-bottom-bar"
+      >
+        <div
+          ref={hScrollRef}
+          aria-hidden="true"
+          onScroll={(e) => {
+            if (gridScrollRef.current) gridScrollRef.current.scrollLeft = e.currentTarget.scrollLeft
+          }}
+          className={`overflow-x-auto overflow-y-hidden border-x border-neutral-400 bg-white ${showHScroll ? '' : 'hidden'}`}
+          data-testid="grid-bottom-hscroll"
+        >
+          <div style={{ width: hScrollWidth, height: 1 }} />
+        </div>
+        {footer}
+      </div>
     </div>
   )
 }

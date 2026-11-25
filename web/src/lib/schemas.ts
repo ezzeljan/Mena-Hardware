@@ -19,17 +19,17 @@ export const signUpSchema = z.object({
 
 export type SignUpFormValues = z.infer<typeof signUpSchema>
 
-export const manufacturerSchema = z.object({
+export const supplierSchema = z.object({
   name: z
     .string()
     .trim()
-    .min(1, 'Manufacturer name is required')
-    .max(100, 'Manufacturer name is too long')
+    .min(1, 'Supplier name is required')
+    .max(100, 'Supplier name is too long')
     .transform((v) => v.toUpperCase()),
   is_owner_supplied: z.boolean(),
 })
 
-export type ManufacturerFormValues = z.infer<typeof manufacturerSchema>
+export type SupplierFormValues = z.infer<typeof supplierSchema>
 
 /**
  * Helper for nullable numeric fields (unit_cost and unit_price):
@@ -65,7 +65,7 @@ export const nullablePriceSchema = z
 
 export const partFormSchema = z.object({
   sku: z.string().trim().min(1, 'SKU is required').max(120, 'SKU is too long'),
-  manufacturer_id: z.string().uuid('Select a manufacturer'),
+  supplier_id: z.string().uuid('Select a supplier'),
   description: z.string().trim().min(1, 'Description is required'),
   unit_cost: z.string().refine(
     (val) => {
@@ -77,6 +77,9 @@ export const partFormSchema = z.object({
     { message: 'Enter a valid non-negative cost or leave blank for no unit price' },
   ),
   active: z.boolean(),
+  /** '' = unfiled. */
+  folder_id: z.union([z.literal(''), z.string().uuid('Select a folder')]),
+  legend: z.string().trim().max(20, 'Legend is too long'),
 })
 
 export type PartFormValues = z.infer<typeof partFormSchema>
@@ -132,7 +135,7 @@ export const projectStageSchema = z.enum(['tender', 'awarded'])
 export const projectFormSchema = z.object({
   reference_no: z.string().trim().max(40, 'Reference No. is too long'),
   name: z.string().trim().min(1, 'Project name is required').max(160, 'Project name is too long'),
-  client: z.string().trim().max(160, 'Client name is too long'),
+  client: z.string().trim().max(160, 'Builder name is too long'),
   site: z.string().trim().max(200, 'Site address is too long'),
   status: projectStatusSchema,
   stage: projectStageSchema,

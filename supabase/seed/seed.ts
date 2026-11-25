@@ -52,15 +52,15 @@ async function main(): Promise<void> {
     await client.connect()
     await client.query('BEGIN')
 
-    // 1. Upsert Manufacturers idempotently
+    // 1. Upsert Suppliers idempotently
     const mfgIdByName = new Map<string, string>()
-    for (const mfg of parsed.manufacturers) {
+    for (const mfg of parsed.suppliers) {
       const res = await client.query<{ id: string }>(
-        `insert into public.manufacturers (name, is_owner_supplied)
+        `insert into public.suppliers (name, is_owner_supplied)
          values ($1, $2)
          on conflict (name) do update
            set is_owner_supplied = excluded.is_owner_supplied
-         where public.manufacturers.is_owner_supplied is distinct from excluded.is_owner_supplied
+         where public.suppliers.is_owner_supplied is distinct from excluded.is_owner_supplied
          returning id`,
         [mfg.name, mfg.is_owner_supplied],
       )
@@ -69,7 +69,7 @@ async function main(): Promise<void> {
         mfgIdByName.set(mfg.name, res.rows[0].id)
       } else {
         const existing = await client.query<{ id: string }>(
-          `select id from public.manufacturers where name = $1`,
+          `select id from public.suppliers where name = $1`,
           [mfg.name],
         )
         if (existing.rows[0]) {
@@ -81,23 +81,23 @@ async function main(): Promise<void> {
     // 2. Insert new Parts idempotently (preserves admin UI edits unless --force-overwrite is passed)
     let insertedOrUpdatedParts = 0
     for (const part of parsed.parts) {
-      const mfgId = mfgIdByName.get(part.manufacturer)
+      const mfgId = mfgIdByName.get(part.supplier)
       if (!mfgId) {
-        throw new Error(`Missing manufacturer ID for ${part.manufacturer}`)
+        throw new Error(`Missing supplier ID for ${part.supplier}`)
       }
 
       const partSeedKey = `part:${part.sku}`
       const res = forceOverwrite
         ? await client.query(
-            `insert into public.parts (sku, manufacturer_id, description, unit_cost, active, seed_key)
+            `insert into public.parts (sku, supplier_id, description, unit_cost, active, seed_key)
              values ($1, $2, $3, $4, true, $5)
              on conflict (sku) do update
-               set manufacturer_id = excluded.manufacturer_id,
+               set supplier_id = excluded.supplier_id,
                    description = excluded.description,
                    unit_cost = excluded.unit_cost,
                    active = true,
                    seed_key = coalesce(public.parts.seed_key, excluded.seed_key)
-             where public.parts.manufacturer_id is distinct from excluded.manufacturer_id
+             where public.parts.supplier_id is distinct from excluded.supplier_id
                 or public.parts.description is distinct from excluded.description
                 or public.parts.unit_cost is distinct from excluded.unit_cost
                 or public.parts.active is distinct from true
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
             [part.sku, mfgId, part.description, part.unit_cost, partSeedKey],
           )
         : await client.query(
-            `insert into public.parts (sku, manufacturer_id, description, unit_cost, active, seed_key)
+            `insert into public.parts (sku, supplier_id, description, unit_cost, active, seed_key)
              values ($1, $2, $3, $4, true, $5)
              on conflict (sku) do update
                set seed_key = excluded.seed_key

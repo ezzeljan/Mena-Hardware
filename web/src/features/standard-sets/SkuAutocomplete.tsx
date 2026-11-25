@@ -10,6 +10,8 @@ interface SkuAutocompleteProps {
   onChange: (sku: string) => void
   onSelectPart: (part: Part) => void
   placeholder?: string
+  /** Show each part's supplier (when parts from several suppliers are listed). */
+  showSupplier?: boolean
 }
 
 export function SkuAutocomplete({
@@ -19,6 +21,7 @@ export function SkuAutocomplete({
   onChange,
   onSelectPart,
   placeholder = 'Type SKU or search library...',
+  showSupplier = false,
 }: SkuAutocompleteProps) {
   const [open, setOpen] = useState(false)
   const [highlightedIndex, setHighlightedIndex] = useState(0)
@@ -128,7 +131,18 @@ export function SkuAutocomplete({
                 }`}
               >
                 <div className="min-w-0">
-                  <div className="font-mono font-semibold">{part.sku}</div>
+                  <div className="font-mono font-semibold">
+                    {part.sku}
+                    {showSupplier && part.suppliers?.name && (
+                      <span
+                        className={`ml-2 font-sans text-[10px] font-medium uppercase ${
+                          isHighlighted ? 'text-neutral-300' : 'text-neutral-500'
+                        }`}
+                      >
+                        {part.suppliers.name}
+                      </span>
+                    )}
+                  </div>
                   <div
                     className={`truncate text-[11px] ${
                       isHighlighted ? 'text-neutral-300' : 'text-neutral-600'

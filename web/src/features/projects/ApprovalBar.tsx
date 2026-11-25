@@ -258,7 +258,7 @@ export function ApprovalBar({
               {modalMode === 'submit' &&
                 'Submitting locks this draft so no further edits can be made unless a new draft revision is created.'}
               {modalMode === 'approve' &&
-                'Approving marks this hardware schedule version as final.'}
+                'Approving marks this hardware quote version as final.'}
               {modalMode === 'reject' &&
                 'Provide a clear comment explaining what needs to be changed.'}
             </DialogDescription>

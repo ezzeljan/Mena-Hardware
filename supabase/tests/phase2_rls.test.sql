@@ -33,6 +33,8 @@ declare
   v_line2_id uuid;
   v_version2_id uuid;
   v_version3_id uuid;
+  v_supplier_id uuid;
+  v_quote_id uuid;
   v_updated integer;
   v_count integer;
   v_err boolean;
@@ -50,6 +52,8 @@ begin
   update public.profiles set role = 'admin' where id = v_admin_id;
   update public.profiles set role = 'estimator' where id in (v_estimator_id, v_other_estimator_id);
   update public.profiles set role = 'pm' where id in (v_pm_id, v_other_pm_id);
+
+  insert into public.suppliers (name) values ('P2 SUPPLIER') returning id into v_supplier_id;
 
   execute 'set local role authenticated';
 
@@ -160,7 +164,7 @@ begin
 
   v_err := false;
   begin
-    perform public.import_quotation(v_project_id, v_project_id::text || '/x.xlsx', 'x.xlsx',
+    perform public.import_quotation(v_project_id, 'Builder A', v_supplier_id, v_project_id::text || '/x.xlsx', 'x.xlsx',
       '{}'::jsonb, '[]'::jsonb, '[{"position": 1, "group_key": "X", "room_name": "X", "door_qty": 1}]'::jsonb);
   exception when insufficient_privilege then
     v_err := true;
@@ -181,6 +185,8 @@ begin
   -- Assigned estimator imports the quotation in one call (version 1 + upload + doors + groups + lines)
   v_version_id := public.import_quotation(
     v_project_id,
+    'Builder A',
+    v_supplier_id,
     v_project_id::text || '/1700000000000-quote.xlsx',
     'quote.xlsx',
     '{"rows": 2}'::jsonb,
@@ -210,10 +216,12 @@ begin
     raise exception 'TEST FAILED: NULL unit_price must stay NULL!';
   end if;
 
-  -- 3c. A second import is refused (start a new revision instead)
+  v_quote_id := (select quote_id from public.project_versions where id = v_version_id);
+
+  -- 3c. A second import for the same builder is refused (re-import instead)
   v_err := false;
   begin
-    perform public.import_quotation(v_project_id, v_project_id::text || '/again.xlsx', 'again.xlsx',
+    perform public.import_quotation(v_project_id, ' builder a ', v_supplier_id, v_project_id::text || '/again.xlsx', 'again.xlsx',
       '{}'::jsonb, '[]'::jsonb, '[{"position": 1, "group_key": "X", "room_name": "X", "door_qty": 1}]'::jsonb);
   exception when others then
     v_err := true;
@@ -453,7 +461,7 @@ begin
 
   -- 8a. Re-import while a draft exists replaces the draft's quotation in place
   v_version3_id := public.reimport_quotation(
-    v_project_id,
+    v_quote_id,
     v_project_id::text || '/1700000000001-quote-rev.xlsx',
     'quote-rev.xlsx',
     '{}'::jsonb,
@@ -481,7 +489,7 @@ begin
   perform public.transition_version(v_version2_id, 'submit', 'Revised quotation');
   v_err := false;
   begin
-    perform public.reimport_quotation(v_project_id, v_project_id::text || '/r2.xlsx', 'r2.xlsx',
+    perform public.reimport_quotation(v_quote_id, v_project_id::text || '/r2.xlsx', 'r2.xlsx',
       '{}'::jsonb, '[]'::jsonb, '[{"position": 1, "group_key": "X", "room_name": "X", "door_qty": 1}]'::jsonb);
   exception when others then
     v_err := true;
@@ -497,7 +505,7 @@ begin
 
   v_err := false;
   begin
-    perform public.reimport_quotation(v_project_id, v_project_id::text || '/pm.xlsx', 'pm.xlsx',
+    perform public.reimport_quotation(v_quote_id, v_project_id::text || '/pm.xlsx', 'pm.xlsx',
       '{}'::jsonb, '[]'::jsonb, '[{"position": 1, "group_key": "X", "room_name": "X", "door_qty": 1}]'::jsonb);
   exception when insufficient_privilege then
     v_err := true;
@@ -509,7 +517,7 @@ begin
   perform set_config('request.jwt.claim.sub', v_estimator_id::text, true);
   perform set_config('request.jwt.claims', json_build_object('sub', v_estimator_id::text, 'role', 'authenticated')::text, true);
 
-  v_version3_id := public.reimport_quotation(v_project_id, v_project_id::text || '/r3.xlsx', 'r3.xlsx',
+  v_version3_id := public.reimport_quotation(v_quote_id, v_project_id::text || '/r3.xlsx', 'r3.xlsx',
     '{}'::jsonb, '[]'::jsonb,
     '[{"position": 1, "group_key": "BATHROOM|NON RATED|SINGLE|2040X820", "room_name": "BATHROOM", "door_qty": 4,
        "match_status": "confirmed", "lines": []}]'::jsonb);
@@ -531,7 +539,7 @@ begin
   perform set_config('request.jwt.claims', json_build_object('sub', v_other_estimator_id::text, 'role', 'authenticated')::text, true);
   v_err := false;
   begin
-    perform public.reimport_quotation(v_project_id, v_project_id::text || '/x.xlsx', 'x.xlsx',
+    perform public.reimport_quotation(v_quote_id, v_project_id::text || '/x.xlsx', 'x.xlsx',
       '{}'::jsonb, '[]'::jsonb, '[{"position": 1, "group_key": "X", "room_name": "X", "door_qty": 1}]'::jsonb);
   exception when insufficient_privilege then
     v_err := true;

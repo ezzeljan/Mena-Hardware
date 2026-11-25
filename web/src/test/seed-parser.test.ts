@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   formatSeedReport,
-  inferManufacturer,
+  inferSupplier,
   parseHardwareWorkbook,
 } from '../../../supabase/seed/parser'
 
@@ -11,15 +11,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const xlsxPath = path.resolve(__dirname, '../../../DOOR_HARDWARE_SET_1.xlsx')
 
 describe('Door Hardware Seed Parser', () => {
-  it('infers manufacturer according to brief rules', () => {
-    expect(inferManufacturer('MMHNG100100BB', 'HINGES 100X100 4BB BLACK')).toBe('MM')
-    expect(inferManufacturer('505BC+SLC', 'SLIDING ARM DOOR CLOSER', true)).toBe('MM')
-    expect(inferManufacturer('6125SSS', 'NOVAS 6000 SERIES VESTIBULE LOCK')).toBe('NOVAS')
-    expect(inferManufacturer('LW160CPDP', 'LOCKWOOD 160 DOOR VIEWER CP')).toBe('LOCKWOOD')
-    expect(inferManufacturer('BB03.300SC.B', 'SCOPE NECKED BARREL BOLT')).toBe('SCOPE')
-    expect(inferManufacturer('TS2000SNVBCSIL', 'GEZE 1 - 4 DOOR CLOSER')).toBe('GEZE')
-    expect(inferManufacturer('FES20', 'FSH HIGH SECURITY MONITORED ELECTRIC STRIKE')).toBe('FSH')
-    expect(inferManufacturer('VINGCARDLOCK', 'VINGCARD RFID LOCK TO BE SUPPLIED BY OTHERS')).toBe(
+  it('infers supplier according to brief rules', () => {
+    expect(inferSupplier('MMHNG100100BB', 'HINGES 100X100 4BB BLACK')).toBe('MM')
+    expect(inferSupplier('505BC+SLC', 'SLIDING ARM DOOR CLOSER', true)).toBe('MM')
+    expect(inferSupplier('6125SSS', 'NOVAS 6000 SERIES VESTIBULE LOCK')).toBe('NOVAS')
+    expect(inferSupplier('LW160CPDP', 'LOCKWOOD 160 DOOR VIEWER CP')).toBe('LOCKWOOD')
+    expect(inferSupplier('BB03.300SC.B', 'SCOPE NECKED BARREL BOLT')).toBe('SCOPE')
+    expect(inferSupplier('TS2000SNVBCSIL', 'GEZE 1 - 4 DOOR CLOSER')).toBe('GEZE')
+    expect(inferSupplier('FES20', 'FSH HIGH SECURITY MONITORED ELECTRIC STRIKE')).toBe('FSH')
+    expect(inferSupplier('VINGCARDLOCK', 'VINGCARD RFID LOCK TO BE SUPPLIED BY OTHERS')).toBe(
       'OTHER',
     )
   })
@@ -37,7 +37,7 @@ describe('Door Hardware Seed Parser', () => {
     const closer2 = result.parts.find((p) => p.sku === 'L505 BC')
     expect(closer1?.unit_cost).toBeNull()
     expect(closer2?.unit_cost).toBeNull()
-    expect(closer1?.manufacturer).toBe('MM')
+    expect(closer1?.supplier).toBe('MM')
 
     // Ensure KITCHEN (FIRE RATED - PIVOT) parts are now included since SKUs match descriptions
     expect(result.parts.find((p) => p.sku === 'STRAIGHTPULL')?.description).toBe('STRAIGHT PULL')
