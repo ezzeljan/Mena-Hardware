@@ -39,6 +39,8 @@ export interface SizingPart {
   supplier_id: string;
   unit_cost: number | null;
   active: boolean;
+  /** The parts library folder's name, when known ("Electronic & security (by others)"). */
+  folder?: string;
 }
 
 export interface SizingLine {

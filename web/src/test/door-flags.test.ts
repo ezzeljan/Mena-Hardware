@@ -53,6 +53,20 @@ describe('applyFlagRules', () => {
     expect(r.lines.map((l) => l.sku)).toEqual(['1500BCSIL', 'KP1.2MM-CSK2', 'ELECTRICSTRIKE', 'CARDREADER'])
   })
 
+  it('Stop column adds a door stop per leaf; the Reed Switch column adds the reed switch', () => {
+    const stop = part('stop', 'MMDOORSTOP', 'MM', '290 DOOR STOP FLOOR MOUNT 25MM HEIGHT')
+    const r = applyFlagRules(SET, [door('Hinge: BH · Stop · Reed switch · Prep: Stop')], 2, [...PARTS, stop], make)
+    expect(r.lines.slice(1).map((l) => [l.sku, l.qty_per_door])).toEqual([
+      ['REEDSWITCH', 1],
+      ['MMDOORSTOP', 2],
+    ])
+    expect(r.notes).toContain('Door stop (Stop column): added MMDOORSTOP ×2')
+    // Not when the set has a stop already, nor from the install cost alone ("Prep: Stop").
+    const withStop: Line[] = [...SET, { ...make(stop, 1), origin: 'set' }]
+    expect(applyFlagRules(withStop, [door('Stop')], 1, [...PARTS, stop], make).lines).toEqual(withStop)
+    expect(applyFlagRules(SET, [door('Prep: Stop')], 1, [...PARTS, stop], make).lines).toEqual(SET)
+  })
+
   it('only adds when every door in the group asks for it; otherwise says so', () => {
     const r = applyFlagRules(SET, [door('ES: RS', '', 5), door('', '', 1)], 1, PARTS, make)
     expect(r.lines).toEqual(SET)

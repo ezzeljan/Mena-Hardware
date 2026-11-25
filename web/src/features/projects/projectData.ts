@@ -3,7 +3,7 @@ import { fetchAllRows } from '@/lib/fetchAll'
 import type { DoorGroup, ProjectLine, QuoteSheet } from '@/types/database'
 
 export const DOOR_GROUP_COLUMNS =
-  'id, version_id, position, group_key, door_tag, room_name, classification, leaf, door_size, door_qty, matched_set_id, match_status, match_score, match_reason, pm_remarks, created_at, updated_at'
+  'id, version_id, position, group_key, door_tag, room_name, classification, leaf, door_size, door_qty, matched_set_id, match_status, match_score, match_reason, pm_remarks, merged_from, created_at, updated_at'
 
 export const PROJECT_LINE_COLUMNS =
   'id, group_id, sheet_id, position, sku, description, qty_per_door, unit_price, origin, part_id, mhqt_remarks, review_flag, created_at, updated_at'

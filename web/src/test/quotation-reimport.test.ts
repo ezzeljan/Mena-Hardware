@@ -46,17 +46,23 @@ function parsed(key: string, qty: number): ParsedDoorGroupPreview {
     match_room: key,
     extra_hinges: null,
     activities: {},
+    lock_cost: '',
   }
 }
 
 describe('diffQuotationGroups', () => {
   it('finds added, removed, quantity-changed and unchanged door groups', () => {
+    // Typical doors differ by size (door type and room are not part of a group).
+    const BATH = '* | * | NON RATED | SINGLE | 2040x820'
+    const ENTRY = '* | * | FIRE RATED | SINGLE | 2340x920'
+    const STORE = '* | * | NON RATED | SINGLE | 2040x720'
+    const COMMS = '* | * | FIRE RATED | SINGLE | 2040x870'
     const changes = diffQuotationGroups(
-      [baseGroup('BATHROOM', 3), baseGroup('ENTRY', 2), baseGroup('STORE', 1)],
-      [parsed('BATHROOM', 3), parsed('ENTRY', 5), parsed('COMMS', 1)],
+      [baseGroup(BATH, 3), baseGroup(ENTRY, 2), baseGroup(STORE, 1)],
+      [parsed(BATH, 3), parsed(ENTRY, 5), parsed(COMMS, 1)],
     )
-    expect(changes.added.map((g) => g.group_key)).toEqual(['COMMS'])
-    expect(changes.removed.map((g) => g.group_key)).toEqual(['STORE'])
+    expect(changes.added.map((g) => g.group_key)).toEqual([COMMS])
+    expect(changes.removed.map((g) => g.group_key)).toEqual([STORE])
     expect(changes.qtyChanged).toEqual([
       expect.objectContaining({ oldQty: 2, newQty: 5 }),
     ])
@@ -117,11 +123,22 @@ describe('diffQuotationGroups with rooms merged', () => {
     expect(makeGroupFinder([a, b])(next.group_key)).toBe(b)
   })
 
-  it('does not take an older group of another size or door type', () => {
-    const other = baseGroup('D62 | SERVICES CUPBOARD | NON RATED | DOUBLE | 2340x620+620', 1)
-    const changes = diffQuotationGroups([other], [parsed('D62a | * | NON RATED | DOUBLE | 2340x620+620', 1)])
+  it('does not take an older group of another size', () => {
+    const other = baseGroup('D62 | SERVICES CUPBOARD | NON RATED | DOUBLE | 2340x720+720', 1)
+    const changes = diffQuotationGroups([other], [parsed('* | * | NON RATED | DOUBLE | 2340x620+620', 1)])
     expect(changes.added).toHaveLength(1)
     expect(changes.removed).toHaveLength(1)
+  })
+
+  it('takes older groups of other door types and rooms with the same specs (door type is not a hardware factor)', () => {
+    const d03 = baseGroup('D-03 | * | NON RATED | SINGLE | 2040x770 | Hinge: BH', 10)
+    const d04 = baseGroup('D-04 | * | NON RATED | SINGLE | 2040x770 | Hinge: BH', 1)
+    const changes = diffQuotationGroups([d03, d04], [parsed('* | * | NON RATED | SINGLE | 2040x770 | Hinge: BH', 11)])
+    expect(changes.added).toHaveLength(0)
+    expect(changes.removed).toHaveLength(0)
+    expect(changes.merged).toEqual([
+      expect.objectContaining({ bases: [d03, d04] }),
+    ])
   })
 })
 

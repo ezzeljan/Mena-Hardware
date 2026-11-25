@@ -59,6 +59,10 @@ const BATH_ROW = (qty: number) => [
 
 async function buildSampleQuotationBuffer(
   rows: Array<Array<string | number>> = [FIRE_ROW(2), BATH_ROW(3)],
+  /** Indexes (in rows) of green (variation) rows. */
+  greenRows: number[] = [],
+  /** Indexes (in rows) of red (excluded in variation) rows. */
+  redRows: number[] = [],
 ): Promise<Buffer> {
   const wb = new ExcelJS.Workbook()
   const ws = wb.addWorksheet('Quotation STL 7sept')
@@ -82,7 +86,15 @@ async function buildSampleQuotationBuffer(
     'QTY',
   ])
   ws.addRow([]) // subtotal row
-  for (const r of rows) ws.addRow(r)
+  rows.forEach((r, i) => {
+    const row = ws.addRow(r)
+    const color = greenRows.includes(i) ? 'FF00B050' : redRows.includes(i) ? 'FFFF0000' : null
+    if (color) {
+      row.eachCell({ includeEmpty: true }, (c) => {
+        c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: color } }
+      })
+    }
+  })
   const arrayBuffer = await wb.xlsx.writeBuffer()
   return Buffer.from(arrayBuffer)
 }
@@ -167,6 +179,8 @@ interface MockState {
   notifications: Row[]
   activity: Row[]
   comments: Row[]
+  uploads?: Row[]
+  quotationDoors?: Row[]
   lastProfileUpdate?: Row
   lastProjectUpdate?: Row
   lastReimport?: { p_quote_id: string; p_groups: Array<Row & { lines: Row[] }> }
@@ -383,8 +397,9 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
   await page.route('**/rest/v1/project_estimators**', async (route) => {
     const method = route.request().method()
     if (method === 'POST') {
-      const payload = route.request().postDataJSON() as Row
-      state.estimators.push({ ...payload, created_at: TS })
+      // One row, or several at once (New Project assigns them in a batch).
+      const payload = route.request().postDataJSON() as Row | Row[]
+      for (const row of Array.isArray(payload) ? payload : [payload]) state.estimators.push({ ...row, created_at: TS })
       return json(route, [], 201)
     }
     if (method === 'DELETE') {
@@ -429,9 +444,13 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
   })
 
   await page.route('**/rest/v1/quotation_uploads**', (route) =>
-    json(route, { id: UPLOAD_ID }, 201),
+    route.request().method() === 'GET'
+      ? json(route, state.uploads ?? [])
+      : json(route, { id: UPLOAD_ID }, 201),
   )
-  await page.route('**/rest/v1/quotation_doors**', (route) => json(route, [], 201))
+  await page.route('**/rest/v1/quotation_doors**', (route) =>
+    route.request().method() === 'GET' ? json(route, state.quotationDoors ?? []) : json(route, [], 201),
+  )
 
   await page.route('**/rest/v1/door_groups**', async (route) => {
     const method = route.request().method()
@@ -690,7 +709,7 @@ async function signIn(page: Page, role: Role) {
   ).toBeVisible()
 }
 
-async function createProjectViaForm(page: Page) {
+async function createProjectViaForm(page: Page, opts: { estimators?: string[] } = {}) {
   await page.getByRole('link', { name: 'Projects', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible()
   await page.getByRole('button', { name: 'New Project' }).click()
@@ -701,6 +720,9 @@ async function createProjectViaForm(page: Page) {
   await page.getByLabel('Site').fill('Sydney CBD')
   // Details only: the form must not ask for a quotation file.
   await expect(page.locator('input[type="file"]')).toHaveCount(0)
+  for (const name of opts.estimators ?? []) {
+    await page.getByTestId('new-project-estimators').getByRole('checkbox', { name }).check()
+  }
   await page.getByRole('button', { name: 'Create Project' }).click()
 
   await expect(page.getByRole('heading', { name: PROJECT_NAME })).toBeVisible()
@@ -809,6 +831,19 @@ test('PM creates a project (auto-assigned), cannot import, assigns an estimator'
   ])
   await expect(page.getByText('Waiting for the PM to assign an estimator.')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'New Quote' })).toHaveCount(0)
+})
+
+test('PM assigns estimators while creating the project', async ({ page }) => {
+  const state = await mockSupabase(page, 'pm')
+  await signIn(page, 'pm')
+  await createProjectViaForm(page, { estimators: ['Erin Estimator'] })
+
+  expect(state.estimators).toEqual([
+    expect.objectContaining({ project_id: PROJECT_ID, estimator_id: ESTIMATOR_ID, assigned_by: PM_ID }),
+  ])
+  // Already on the team: no "waiting for an estimator" note.
+  await expect(page.getByRole('button', { name: 'Remove Erin Estimator' })).toBeVisible()
+  await expect(page.getByText('Waiting for the PM to assign an estimator.')).toHaveCount(0)
 })
 
 test('Estimator cannot create projects; assigned estimator imports and submits', async ({
@@ -920,15 +955,20 @@ test('Admin: create project -> import quotation -> submit -> approve -> export E
   expect(hwSheet!.getCell('B4').value).toEqual(new Date(Date.UTC(now.getFullYear(), now.getMonth(), 15)))
   expect((hwSheet!.getCell('E4').value as { result: number }).result).toBe(5) // OVERALL DOOR QTY: 2 + 3
   expect(hwSheet!.getCell('M5').value).toBe('MHQT  REMARKS')
-  expect(hwSheet!.getCell('A6').value).toBe('Fire Egress - Basement') // as written in the quotation
+  // Door groups are numbered A–Z by room: Bathroom first, then Fire Egress.
+  expect(hwSheet!.getCell('A6').value).toBe('Bathroom') // as written in the quotation
   expect(hwSheet!.getCell('D6').value).toBe('DOOR QTY:')
-  // Line 1 of group 1 is the owner-supplied MM hinge
-  expect(hwSheet!.getCell('A7').value).toBe('MM')
-  expect(hwSheet!.getCell('B7').value).toBe('MM')
-  expect(hwSheet!.getCell('C7').value).toBe('MMHINGE')
-  // Line 2 of group 1 is 505BC+SLC; its missing unit price stays empty
-  expect(hwSheet!.getCell('C8').value).toBe('505BC+SLC')
-  expect(hwSheet!.getCell('F8').value).toBeNull()
+  let fire = 7
+  while (fire < 60 && hwSheet!.getCell(`A${fire}`).value !== 'Fire Egress - Basement') fire++
+  expect(hwSheet!.getCell(`A${fire}`).value).toBe('Fire Egress - Basement')
+  expect(hwSheet!.getCell(`D${fire}`).value).toBe('DOOR QTY:')
+  // Line 1 of the fire group is the owner-supplied MM hinge
+  expect(hwSheet!.getCell(`A${fire + 1}`).value).toBe('MM')
+  expect(hwSheet!.getCell(`B${fire + 1}`).value).toBe('MM')
+  expect(hwSheet!.getCell(`C${fire + 1}`).value).toBe('MMHINGE')
+  // Line 2 is 505BC+SLC; its missing unit price stays empty
+  expect(hwSheet!.getCell(`C${fire + 2}`).value).toBe('505BC+SLC')
+  expect(hwSheet!.getCell(`F${fire + 2}`).value).toBeNull()
 })
 
 test('Assigned estimator re-imports an updated quotation: unchanged groups keep their edits', async ({
@@ -1373,6 +1413,264 @@ test('Hardware grid: horizontal scrollbar and sheet tabs pinned to the bottom of
   expect(Math.abs(Number(gap))).toBeLessThanOrEqual(2)
 })
 
+test('Hardware grid: merge door groups (choosing hardware not in both) and unmerge', async ({ page }) => {
+  const seed = COMMENT_SEED('draft')
+  seed.doorGroups = [
+    { ...seed.doorGroups[0] },
+    {
+      ...seed.doorGroups[0], id: 'group-c-2', position: 2, group_key: 'C2', door_tag: 'DR-002',
+      room_name: 'STORE', door_qty: 1,
+    },
+  ]
+  seed.lines = [
+    { ...seed.lines[0] },
+    { ...seed.lines[0], id: 'pline-c-2', position: 2, sku: 'DS-1', description: 'DOOR STOP' },
+    { ...seed.lines[0], id: 'pline-c-3', group_id: 'group-c-2' },
+    { ...seed.lines[0], id: 'pline-c-4', group_id: 'group-c-2', position: 2, sku: 'KP-1', description: 'KICK PLATE' },
+  ]
+  const state = await mockSupabase(page, 'estimator', seed)
+  // Mirrors merge_door_groups / unmerge_door_group (migration 026).
+  let mergeBody: Record<string, unknown> | null = null
+  await page.route('**/rest/v1/rpc/merge_door_groups', async (route) => {
+    const b = route.request().postDataJSON() as {
+      p_target: string; p_others: string[]; p_room_name: string; p_keep_line_ids: string[]; p_copy_line_ids: string[]
+    }
+    mergeBody = b
+    const target = state.doorGroups.find((g) => g.id === b.p_target)!
+    const others = state.doorGroups.filter((g) => b.p_others.includes(g.id as string))
+    const parts = [target, ...others].map((g) => ({ group_key: g.group_key, room_name: g.room_name, door_qty: g.door_qty, door_tag: g.door_tag }))
+    const copies = state.lines
+      .filter((l) => b.p_copy_line_ids.includes(l.id as string))
+      .map((l, i) => ({ ...l, id: `copy-${i}`, group_id: b.p_target, position: 10 + i }))
+    state.lines = state.lines.filter(
+      (l) => (l.group_id === b.p_target && b.p_keep_line_ids.includes(l.id as string)) || (l.group_id !== b.p_target && !b.p_others.includes(l.group_id as string)),
+    )
+    state.lines.push(...copies)
+    Object.assign(target, {
+      door_qty: [target, ...others].reduce((n, g) => n + Number(g.door_qty), 0),
+      room_name: b.p_room_name,
+      merged_from: parts,
+    })
+    state.doorGroups = state.doorGroups.filter((g) => !b.p_others.includes(g.id as string))
+    await route.fulfill({ status: 204, body: '' })
+  })
+  await page.route('**/rest/v1/rpc/unmerge_door_group', async (route) => {
+    const { p_group } = route.request().postDataJSON() as { p_group: string }
+    const g = state.doorGroups.find((x) => x.id === p_group)!
+    const [first, ...rest] = g.merged_from as Array<Record<string, unknown>>
+    const groupLines = state.lines.filter((l) => l.group_id === p_group)
+    rest.forEach((p, i) => {
+      const id = `restored-${i}`
+      state.doorGroups.push({ ...g, ...p, id, position: Number(g.position) + i + 1, merged_from: [] })
+      state.lines.push(...groupLines.map((l, j) => ({ ...l, id: `${id}-line-${j}`, group_id: id })))
+    })
+    Object.assign(g, first, { merged_from: [] })
+    await route.fulfill({ status: 204, body: '' })
+  })
+
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/hardware`)
+  await expect(page.getByText('MMHINGE').first()).toBeVisible()
+
+  // Tick both groups and merge.
+  await page.getByLabel('Select LOBBY to merge').check()
+  await expect(page.getByRole('button', { name: 'Merge 1 groups' })).toBeDisabled()
+  await page.getByLabel('Select STORE to merge').check()
+  await page.getByRole('button', { name: 'Merge 2 groups' }).click()
+
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('heading', { name: 'Merge 2 Door Groups' })).toBeVisible()
+  await expect(dialog.getByLabel('Room Name')).toHaveValue('LOBBY / STORE')
+  // The hinge is in both; the door stop and kick plate are offered.
+  const uncommon = dialog.getByTestId('merge-uncommon')
+  await expect(uncommon).toContainText("Some hardware isn't in every group")
+  await expect(uncommon).toContainText('DS-1')
+  await expect(uncommon).toContainText('In LOBBY · not in STORE')
+  await expect(uncommon).toContainText('KP-1')
+  await expect(uncommon).not.toContainText('MMHINGE')
+  // Leave out the door stop, keep the kick plate.
+  await dialog.getByLabel('Include DS-1 ×3').uncheck()
+  await dialog.getByRole('button', { name: 'Merge', exact: true }).click()
+
+  await expect(dialog).toBeHidden()
+  expect(mergeBody).toMatchObject({
+    p_target: 'group-c-1',
+    p_others: ['group-c-2'],
+    p_room_name: 'LOBBY / STORE',
+    p_keep_line_ids: ['pline-c-1'],
+    p_copy_line_ids: ['pline-c-4'],
+  })
+  await expect(page.getByText('LOBBY / STORE')).toBeVisible()
+  await expect(page.getByText('KP-1')).toBeVisible()
+  await expect(page.getByText('DS-1')).toHaveCount(0)
+
+  // Unmerge: both groups again, each with the current hardware.
+  page.once('dialog', (d) => {
+    expect(d.message()).toContain('LOBBY (2), STORE (1)')
+    void d.accept()
+  })
+  await page.getByRole('button', { name: 'Unmerge LOBBY / STORE' }).click()
+  await expect(page.getByLabel('Select STORE to merge')).toBeVisible()
+  await expect(page.getByLabel('Select LOBBY to merge')).toBeVisible()
+  await expect(page.getByText('KP-1')).toHaveCount(2)
+})
+
+test('Import page: the Variation tab lists green rows and the door group each added door joins', async ({ page }) => {
+  const VARY_FIRE = ['Basement 02', 'DR-001', 'FS2', 'Fire Egress - Basement', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2340, 870, '-', 1, '', '', 1]
+  const VARY_PLANT = ['Level 02', 'DR-003', 'A02', 'Plant Room - Fire Pump', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2040, 820, '-', 1, '', '', 1]
+  const VARY_NO_QTY = ['Level 03', 'DR-004', 'A03', 'Store', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, '', '', '']
+  const RED_ROW = ['Level 03', 'DR-005', 'A04', 'Linen', 'ST', '-/-/-', 'SC1', 2040, 620, '-', 1, '', '', 1]
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/import?builder=Bolt%20Construct&supplier=${SUPPLIER_ID}`)
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'Bolt.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: await buildSampleQuotationBuffer([FIRE_ROW(2), VARY_FIRE, VARY_PLANT, VARY_NO_QTY, RED_ROW], [1, 2, 3], [4]),
+  })
+
+  await expect(page.getByTestId('variation-summary')).toContainText(
+    '2 doors added (QTY filled); 1 row without a QTY not counted; 1 door excluded (red rows)',
+  )
+  // Between Parsed Rows and Excluded.
+  const tabs = page.getByRole('button', { name: /^(Parsed Rows|Variation|Excluded)/ })
+  await expect(tabs).toHaveText([/Parsed Rows/, 'Variation (2 added, 1 excluded)', 'Excluded (1)'])
+  await page.getByRole('button', { name: 'Variation (2 added, 1 excluded)' }).click()
+  const table = page.getByTestId('variation-table')
+  const rows = table.getByRole('row')
+  // Added doors first: the fire door joins the existing group, the plant room is a new group.
+  await expect(rows.nth(1)).toContainText('Fire Egress - Basement')
+  await expect(rows.nth(1)).toContainText('Added to existing group #1 Fire Egress - Basement (2 → 3 doors)')
+  await expect(rows.nth(1)).toContainText('FIRE RATED · SINGLE · 2340x870')
+  await expect(rows.nth(2)).toContainText('New door group #2 Plant Room - Fire Pump')
+  // The red row is excluded even with QTY 1.
+  await expect(rows.nth(3)).toContainText('Linen')
+  await expect(rows.nth(3)).toContainText('Excluded (red row)')
+  await expect(rows.nth(4)).toContainText('Not counted (no QTY)')
+})
+
+test('Import page: comments show beside the hardware (Door Groups, Parsed Rows, Matching Review)', async ({ page }) => {
+  const COMMENTED = [
+    'Basement 02', 'DR-001', 'FS2', 'Fire Egress - Basement', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2340, 870, '-', 1,
+    'Door to be painted', 'Check closer arm on site', 1,
+  ]
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/import?builder=Bolt%20Construct&supplier=${SUPPLIER_ID}`)
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'Bolt.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: await buildSampleQuotationBuffer([FIRE_ROW(2), COMMENTED]),
+  })
+
+  // Door Groups: the group's comments, each once.
+  const groupRow = page.getByRole('row').filter({ hasText: 'Fire Egress - Basement' })
+  await expect(page.getByRole('columnheader', { name: 'Comments' })).toBeVisible()
+  await expect(groupRow.getByTestId('row-comments')).toContainText('Door to be painted')
+  await expect(groupRow.getByTestId('row-comments')).toContainText('Check closer arm on site')
+
+  // Parsed Rows: per door.
+  await page.getByRole('button', { name: /^Parsed Rows/ }).click()
+  await expect(page.getByRole('row').filter({ hasText: 'FS2' }).getByTestId('row-comments')).toContainText('Door to be painted')
+
+  // Matching Review: beside Score & Reason.
+  await page.getByRole('button', { name: 'Next' }).click()
+  await expect(page.getByRole('columnheader', { name: 'Comments' })).toBeVisible()
+  await expect(
+    page.getByRole('row').filter({ hasText: 'Fire Egress - Basement' }).getByTestId('row-comments'),
+  ).toContainText('Check closer arm on site')
+})
+
+test('Import page: filter the Matching Review list by door group and status', async ({ page }) => {
+  const PLANT_ROW = [
+    'Level 02', 'DR-003', 'A02', 'Plant Room - Fire Pump', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2040, 820, '-', 1, '', '', 1,
+  ]
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/import?builder=Bolt%20Construct&supplier=${SUPPLIER_ID}`)
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'Bolt.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: await buildSampleQuotationBuffer([FIRE_ROW(2), PLANT_ROW]),
+  })
+  await page.getByRole('button', { name: 'Next' }).click()
+
+  const fire = page.getByLabel('Standard Set for Fire Egress - Basement')
+  const plant = page.getByLabel('Standard Set for Plant Room - Fire Pump')
+  await expect(fire).toBeVisible()
+  await expect(plant).toBeVisible()
+
+  // By door group (room name, any capitals).
+  await page.getByLabel('Filter door groups').fill('plant')
+  await expect(plant).toBeVisible()
+  await expect(fire).toHaveCount(0)
+  await expect(page.getByTestId('matching-filter')).toContainText('Showing 1 of 2')
+
+  // By size, then nothing matches.
+  await page.getByLabel('Filter door groups').fill('2340x870')
+  await expect(fire).toBeVisible()
+  await expect(plant).toHaveCount(0)
+  await page.getByLabel('Filter door groups').fill('no such room')
+  await expect(page.getByText('No door groups match the filter.')).toBeVisible()
+
+  // By status: make the plant room custom (manual), then show only manual groups.
+  await page.getByTestId('matching-filter').getByRole('button', { name: 'Clear' }).click()
+  await plant.selectOption({ label: 'Custom (Type door group...)' })
+  await page.getByLabel('Custom door group for Plant Room - Fire Pump').fill('PUMP ROOM')
+  await page.getByLabel('Filter by status').selectOption('manual')
+  await expect(plant).toBeVisible()
+  await expect(fire).toHaveCount(0)
+  // The set / custom name counts too.
+  await page.getByLabel('Filter by status').selectOption('ALL')
+  await page.getByLabel('Filter door groups').fill('pump room')
+  await expect(plant).toBeVisible()
+  await expect(fire).toHaveCount(0)
+})
+
+test('Import page: merge door groups before saving, and unmerge', async ({ page }) => {
+  const PLANT_ROW = [
+    'Level 02', 'DR-003', 'A02', 'Plant Room - Fire Pump', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2040, 820, '-', 1, '', '', 1,
+  ]
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/import?builder=Bolt%20Construct&supplier=${SUPPLIER_ID}`)
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'Bolt.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: await buildSampleQuotationBuffer([FIRE_ROW(2), PLANT_ROW]),
+  })
+  await page.getByRole('button', { name: 'Next' }).click()
+
+  await page.getByLabel('Select Fire Egress - Basement to merge').check()
+  await page.getByLabel('Select Plant Room - Fire Pump to merge').check()
+  await page.getByRole('button', { name: 'Merge 2 groups' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByLabel('Room Name')).toHaveValue('Fire Egress - Basement / Plant Room - Fire Pump')
+  // Different sizes: it says the first group's are kept.
+  await expect(dialog).toContainText('different ratings, leaves or sizes')
+  await dialog.getByRole('button', { name: 'Merge', exact: true }).click()
+
+  // One group of 3 doors, which can be unmerged.
+  const merged = page.getByRole('row').filter({ hasText: 'Fire Egress - Basement / Plant Room - Fire Pump' })
+  await expect(merged).toContainText('3')
+  await expect(page.getByLabel('Select Plant Room - Fire Pump to merge')).toHaveCount(0)
+  await merged.getByRole('button', { name: /^Unmerge/ }).click()
+  await expect(page.getByLabel('Select Plant Room - Fire Pump to merge')).toBeVisible()
+  await expect(page.getByLabel('Select Fire Egress - Basement to merge')).toBeVisible()
+})
+
 test('Supplier sheets: add a sheet, flag other-supplier parts, rename, export both', async ({ page }) => {
   const state = await mockSupabase(page, 'estimator', COMMENT_SEED('draft'))
   await signIn(page, 'estimator')
@@ -1488,6 +1786,56 @@ test('PM comments on one supplier sheet', async ({ page }) => {
   await expect(page.getByRole('tab', { name: /^NOVAS\s*1$/ })).toBeVisible()
 })
 
+test('Project overview: the PM sees each upload compared with the one before (added, removed, variation)', async ({ page }) => {
+  const UPLOAD2_ID = 'cccccccc-cccc-cccc-cccc-ccccccccccc2'
+  const d = (upload: string, ref: string, room: string, size: string, row: number) => ({
+    id: `${upload}-${row}`, upload_id: upload, door_ref: ref, room_name: room, classification: 'NON RATED',
+    leaf: 'SINGLE', door_size: size, qty: 1, source_row: row, created_at: TS,
+  })
+  await mockSupabase(page, 'pm', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+    versions: [
+      {
+        id: VERSION_ID, project_id: PROJECT_ID, quote_id: QUOTE_ID, version_no: 1, status: 'superseded',
+        upload_id: UPLOAD_ID, markup_pct: 15, created_by: ESTIMATOR_ID, submitted_at: TS, created_at: TS, updated_at: TS,
+      },
+      {
+        id: VERSION2_ID, project_id: PROJECT_ID, quote_id: QUOTE_ID, version_no: 2, status: 'submitted',
+        upload_id: UPLOAD2_ID, markup_pct: 15, created_by: ESTIMATOR_ID, submitted_at: TS, created_at: TS, updated_at: TS,
+      },
+    ],
+    uploads: [
+      { id: UPLOAD_ID, original_filename: 'Bolt v1.xlsx', uploaded_by: ESTIMATOR_ID, created_at: TS, parse_report: {} },
+      {
+        id: UPLOAD2_ID, original_filename: 'Bolt v2.xlsx', uploaded_by: ESTIMATOR_ID, created_at: TS,
+        parse_report: { variationRows: [{ row: 12, rawRef: 'L2 · A9 · D-09', room_name: 'Study', qty: 1 }] },
+      },
+    ],
+    quotationDoors: [
+      d(UPLOAD_ID, 'L1 · A1 · D-01', 'Bedroom', '2040x820', 10),
+      d(UPLOAD_ID, 'L1 · A2 · D-02', 'Store', '2040x820', 11),
+      d(UPLOAD2_ID, 'L1 · A1 · D-01', 'Bedroom', '2040x820', 10),
+      d(UPLOAD2_ID, 'L2 · A9 · D-09', 'Study', '2040x770', 12),
+    ],
+  })
+  await signIn(page, 'pm')
+  await page.goto(`/projects/${PROJECT_ID}`)
+
+  const panel = page.getByTestId('quotation-uploads')
+  await expect(panel).toContainText('Bolt v2.xlsx')
+  await expect(panel).toContainText('1 added in variation')
+  await expect(panel).toContainText('First upload.')
+  const changes = panel.getByTestId('door-changes')
+  await expect(changes).toContainText('Doors added: 1 (1 in variation)')
+  await expect(changes).toContainText('Removed: 1')
+  await expect(changes).toContainText('Total doors: 2 → 2')
+  await changes.getByText('Removed doors (1)').click()
+  await expect(changes).toContainText('L1 · A2 · D-02')
+  await changes.getByText('Added doors (1)').click()
+  await expect(changes.getByRole('row').filter({ hasText: 'D-09' })).toContainText('Variation')
+})
+
 test('Awarded project: the other quotes are read-only and no quote can be added', async ({ page }) => {
   await mockSupabase(page, 'estimator', {
     project: {
@@ -1540,6 +1888,50 @@ test('Awarded project: the other quotes are read-only and no quote can be added'
     BUILDER,
     'Bolt Construct (awarded)',
   ])
+})
+
+test('Import page: custom door groups can be picked again (typed here or saved in the project)', async ({ page }) => {
+  const PLANT_ROW = [
+    'Level 02', 'DR-003', 'A02', 'Plant Room - Fire Pump', 'F (Metal Sng Reb)', '-/120/30', 'FR2', 2040, 820, '-', 1, '', '', 1,
+  ]
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  // A custom door group already used on another quote of this project.
+  await page.route('**/rest/v1/door_groups**', async (route) => {
+    if (!route.request().url().includes('match_reason=like')) return route.fallback()
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ match_reason: 'Custom: LINEN CUPBOARD' }]) })
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/import?builder=Bolt%20Construct&supplier=${SUPPLIER_ID}`)
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'Bolt.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: await buildSampleQuotationBuffer([FIRE_ROW(2), PLANT_ROW]),
+  })
+  await page.getByRole('button', { name: 'Next' }).click()
+
+  const plant = page.getByLabel('Standard Set for Plant Room - Fire Pump')
+  const fire = page.getByLabel('Standard Set for Fire Egress - Basement')
+
+  // The project's saved custom group is offered straight away.
+  await expect(plant.locator('option', { hasText: 'Custom: LINEN CUPBOARD' })).toHaveCount(1)
+
+  // Type a new custom group on one row...
+  await plant.selectOption({ label: 'Custom (Type door group...)' })
+  await page.getByLabel('Custom door group for Plant Room - Fire Pump').fill('PUMP ROOM')
+
+  // ...and pick it on another, without typing.
+  await fire.selectOption({ label: 'Custom: PUMP ROOM' })
+  await expect(page.getByLabel('Custom door group for Fire Egress - Basement')).toHaveValue('PUMP ROOM')
+  await expect(fire).toHaveValue('__CUSTOM__:PUMP ROOM')
+
+  // The saved one works too; "Custom (Type…)" starts a fresh name.
+  await fire.selectOption({ label: 'Custom: LINEN CUPBOARD' })
+  await expect(page.getByLabel('Custom door group for Fire Egress - Basement')).toHaveValue('LINEN CUPBOARD')
+  await fire.selectOption({ label: 'Custom (Type door group...)' })
+  await expect(page.getByLabel('Custom door group for Fire Egress - Basement')).toHaveValue('')
 })
 
 test('Import page: Confirm All Auto confirms low-confidence matches too (after asking)', async ({ page }) => {

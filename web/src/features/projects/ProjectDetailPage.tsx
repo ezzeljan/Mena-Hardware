@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -23,6 +23,7 @@ import { ProjectActivityPanel } from '@/features/projects/ProjectActivityPanel'
 import { StageBadge, StageSelect } from '@/features/projects/ProjectStage'
 import { ProjectTeamPanel } from '@/features/projects/ProjectTeamPanel'
 import { HardwareQuotesPanel } from '@/features/projects/HardwareQuotesPanel'
+import { QuotationUploadsPanel } from '@/features/projects/QuotationUploadsPanel'
 import { NewQuoteDialog } from '@/features/projects/NewQuoteDialog'
 import { useSupplierOptions } from '@/features/projects/useSuppliers'
 import { deleteProjectWithStorage } from '@/features/projects/deleteProject'
@@ -71,6 +72,8 @@ function DetailField({
  */
 export function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>()
+  // Set by New Project when the project was created but its estimators couldn't be added.
+  const teamError = (useLocation().state as { teamError?: string } | null)?.teamError ?? null
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const {
@@ -303,6 +306,12 @@ export function ProjectDetailPage() {
         Project Team (left) | Hardware Quotes (centre) | Activities (right).
         On medium screens Activities drops below the other two.
       */}
+      {teamError && (
+        <div role="alert" className="border border-neutral-950 bg-neutral-50 p-3 text-xs text-neutral-950">
+          The project was created, but its estimators couldn't be added ({teamError}). Add them in
+          Project Team.
+        </div>
+      )}
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[max-content_minmax(0,1fr)] xl:grid-cols-[max-content_minmax(0,1fr)_20rem]">
         {/* Sized to its content (longest name), capped so many estimators wrap */}
         <div className="lg:max-w-xs">
@@ -328,6 +337,8 @@ export function ProjectDetailPage() {
 
         <ProjectActivityPanel projectId={project.id} className="lg:col-span-2 xl:col-span-1" />
       </div>
+
+      <QuotationUploadsPanel quotes={quotes} />
 
       <NewQuoteDialog
         open={newQuoteOpen}

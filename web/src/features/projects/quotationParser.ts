@@ -1,10 +1,12 @@
 import type ExcelJS from 'exceljs';
 // Relative path (not '@/') so the parser also loads in the Playwright tests.
 import { loadExcelJS } from '../../lib/loadExcelJS';
-import { commentItems } from './doorFlags';
-import { makeGroupKey, typicalDoorOf } from './groupKey';
+import { commentItems, NEEDS_CONFIRMATION } from './doorFlags';
+import { fontColorOf, isGreenFill, isRedFill, themeColorsOf } from './rowColor';
+import { makeGroupKey, parseGroupKey, typicalDoorOf } from './groupKey';
 import {
   ACTIVITY_COLUMNS,
+  ACTIVITY_LABEL,
   activitiesToken,
   activityQuantities,
   activityRates,
@@ -30,8 +32,39 @@ export interface ParsedQuotationDoor {
   extra_hinges: number | null;
   /** Door schedule and Mena comments, joined with " | " ('' when none). */
   comments: string;
+  /** The Door Schedule Comments column ('' when none). */
+  schedule_comments?: string;
+  /** The Mena Contractors comments columns, joined with " | " ('' when none). */
+  mena_comments?: string;
+  /** Comments written in blue or red in the quotation, by text (the rest are black). */
+  comment_colors?: Record<string, 'blue' | 'red'>;
   /** Parts its PREPARATION / INSTALLATION costs call for, with quantities (see doorActivities.ts). */
   activities: DoorActivities;
+  /**
+   * LOCK PREP / LOCK INST costs: "15", "25", or "25/70" when they differ
+   * ('' when none or excluded). They say what lock the door needs (lockRules.ts).
+   */
+  lock_cost: string;
+  /**
+   * The prep / install cells as written, by item ("Closer" -> "44",
+   * "Extra hinge" -> "9"); shown beside each item, not part of the group key.
+   */
+  prep_values?: Record<string, string>;
+  /** On a green row: a door added in a variation. */
+  variation: boolean;
+}
+
+/**
+ * A variation row. Green ('added'): with a QTY it's a door added in the
+ * variation; without one it isn't counted. Red ('removed'): the door is
+ * excluded even with a QTY.
+ */
+export interface VariationRow {
+  row: number;
+  rawRef: string;
+  room_name: string;
+  qty: number | null;
+  kind: 'added' | 'removed';
 }
 
 export interface ParsedDoorGroupPreview {
@@ -52,6 +85,10 @@ export interface ParsedDoorGroupPreview {
   extra_hinges: number | null;
   /** Prep / install activities of every door in the group (part of the hardware, so the same). */
   activities: DoorActivities;
+  /** LOCK PREP / LOCK INST of every door in the group (part of the hardware, so the same). */
+  lock_cost: string;
+  /** Each prep / install item's cell values across the group's doors ("22" or "22/44"). */
+  prep_values?: Record<string, string>;
 }
 
 export interface ParseIssue {
@@ -93,6 +130,10 @@ export interface QuotationParseResult {
   includedRows: number[];
   /** Prep / install activity columns the sheet has (an activity is only flagged as missing when its column is there). */
   activityColumns: ActivityKey[];
+  /** Green (variation) rows, in sheet order. */
+  variationRows: VariationRow[];
+  /** Each HW column: its label in the hardware text ("Closer") and header in the sheet ("Self Closing"), in sheet order. */
+  hardwareHeaders: Array<[label: string, header: string]>;
 }
 
 interface ColumnMap {
@@ -110,29 +151,73 @@ interface ColumnMap {
   leafs?: number;
   scheduleComments?: number;
   menaComments?: number;
+  /**
+   * Every Mena Contractors comments column: the unnamed one(s) between Door
+   * Schedule Comments and Mena Contractors Comments, then that column.
+   */
+  menaCommentCols: number[];
   extraHinge?: number;
+  lockPrep?: number;
+  lockInst?: number;
   qty: number;
   /** PREPARATION / INSTALLATION COST activity columns: [activity, column]. */
   activities: Array<[ActivityKey, number]>;
   /** Hardware columns found, in sheet order: [label, column]. */
-  hardware: Array<[string, number]>;
+  hardware: Array<[label: string, column: number, header: string]>;
 }
 
-/** Hardware columns of the Mena door schedule and the short label shown for each. */
+/**
+ * Hardware columns of the Mena door schedule and the short label shown for
+ * each (headers as normalizeHeader gives them). Columns under an "HW" /
+ * "HARDWARE" heading are hardware too, whatever they're called (labelled as
+ * written).
+ */
 const HARDWARE_COLUMNS: Record<string, string> = {
   'self closing': 'Closer',
+  closer: 'Closer',
+  closers: 'Closer',
   'fire seal': 'Fire seal',
   'smoke seal': 'Smoke seal',
+  'drop seal': 'Drop seal',
   hinge: 'Hinge',
+  hinges: 'Hinge',
   handle: 'Handle',
+  handles: 'Handle',
   lock: 'Lock',
+  lockset: 'Lock',
   latch: 'Latch',
   bolt: 'Bolt',
+  stop: 'Stop',
+  stops: 'Stop',
   'door stop': 'Stop',
+  'door stops': 'Stop',
   keying: 'Keying',
   'door grille': 'Grille',
   'electric strike': 'ES',
+  'reed switch': 'Reed switch',
+  kickplate: 'Kick plate',
+  'kick plate': 'Kick plate',
+  'kick plates': 'Kick plate',
+  'card reader': 'Card reader',
+  'door viewer': 'Viewer',
 };
+
+/** Headings over the hardware columns (the row above the column headers). */
+const HARDWARE_BAND = /^(hw|hardware|door hardware)$/;
+
+/** Columns under an "HW" / "HARDWARE" heading in the rows just above the header row. */
+function hardwareBandColumns(ws: ExcelJS.Worksheet, headerRow: number, maxCol: number): Set<number> {
+  const cols = new Set<number>();
+  for (let rr = Math.max(1, headerRow - 3); rr < headerRow; rr++) {
+    const row = ws.getRow(rr);
+    for (let c = 1; c <= maxCol; c++) {
+      const cell = row.getCell(c);
+      const text = normalizeHeader(cellToString(cell.isMerged ? cell.master : cell));
+      if (HARDWARE_BAND.test(text)) cols.add(c);
+    }
+  }
+  return cols;
+}
 
 function cellToString(cell: ExcelJS.Cell): string {
   let v: unknown = cell.value;
@@ -164,9 +249,9 @@ function normalizeHeader(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-function matchColumns(row: ExcelJS.Row, maxCol: number): ColumnMap | null {
+function matchColumns(row: ExcelJS.Row, maxCol: number, hwBand: Set<number> = new Set()): ColumnMap | null {
   const found: Partial<ColumnMap> = {};
-  const hardware: Array<[string, number]> = [];
+  const hardware: Array<[string, number, string]> = [];
   const seenHardware = new Set<string>();
   const activities: Array<[ActivityKey, number]> = [];
   for (let c = 1; c <= maxCol; c++) {
@@ -189,15 +274,32 @@ function matchColumns(row: ExcelJS.Row, maxCol: number): ColumnMap | null {
     else if (h === 'mena contractors comments' && !found.menaComments) found.menaComments = c;
     else if (h === 'qty' && !found.qty) found.qty = c;
     else if (h === 'extra hinge fr' && !found.extraHinge) found.extraHinge = c;
-    else if (h in ACTIVITY_COLUMNS) activities.push([ACTIVITY_COLUMNS[h], c]);
-    else if (h in HARDWARE_COLUMNS && !seenHardware.has(h)) {
-      seenHardware.add(h);
-      hardware.push([HARDWARE_COLUMNS[h], c]);
-    }
+    else if (found.qty && h === 'lock prep' && !found.lockPrep) found.lockPrep = c;
+    else if (found.qty && h === 'lock inst' && !found.lockInst) found.lockInst = c;
+    // Hardware is in the door schedule, left of QTY; the prep / install
+    // costs are right of it (both can have a "Stop" or "Closer" column).
+    else if (!found.qty && (h in HARDWARE_COLUMNS || hwBand.has(c))) {
+      if (!seenHardware.has(h)) {
+        seenHardware.add(h);
+        // Under the HW heading but not a column we know: labelled as written.
+        hardware.push([HARDWARE_COLUMNS[h] ?? raw, c, raw]);
+      }
+    } else if (h in ACTIVITY_COLUMNS) activities.push([ACTIVITY_COLUMNS[h], c]);
   }
 
   if (found.roomName && found.qty) {
-    return { ...(found as ColumnMap), hardware, activities };
+    // The COMMENTS band: Door Schedule Comments, an unnamed column, Mena
+    // Contractors Comments. The unnamed one is also Mena's.
+    const menaCommentCols: number[] = [];
+    if (found.menaComments) {
+      if (found.scheduleComments && found.scheduleComments < found.menaComments) {
+        for (let c = found.scheduleComments + 1; c < found.menaComments; c++) {
+          if (!cellToString(row.getCell(c))) menaCommentCols.push(c);
+        }
+      }
+      menaCommentCols.push(found.menaComments);
+    }
+    return { ...(found as ColumnMap), hardware, activities, menaCommentCols };
   }
   return null;
 }
@@ -217,10 +319,11 @@ function findQuotationSheet(wb: ExcelJS.Workbook): {
   for (const ws of wb.worksheets) {
     if (ws.rowCount < 3 || ws.columnCount < 5) continue;
     const scanLimit = Math.min(20, ws.rowCount);
-    const maxCol = Math.min(80, ws.columnCount);
+    // Wide enough for the prep / install columns (to about column 110).
+    const maxCol = Math.min(160, ws.columnCount);
 
     for (let r = 1; r <= scanLimit; r++) {
-      const cols = matchColumns(ws.getRow(r), maxCol);
+      const cols = matchColumns(ws.getRow(r), maxCol, hardwareBandColumns(ws, r, maxCol));
       if (!cols) continue;
 
       let score = 10;
@@ -343,20 +446,31 @@ export function normalizeDoorSize(
 }
 
 /**
- * Group doors into typical doors: the same door type, classification, leaf,
- * size and hardware (the group key; see groupKey.ts). Doors of one door type
- * in different rooms are one group, named after its rooms as written in the
- * file ("Services cupboard / Services cupboard - B1 & B2"); a door whose
- * hardware differs gets its own group. Doors without a door type are grouped
- * per room.
+ * Group doors into typical doors: the same room, classification, leaf, size
+ * (height and widths) and hardware (the group key; see groupKey.ts). The door type doesn't change
+ * the hardware, so doors of several door types in one room are one group that
+ * lists them ("D-03 / D-04"). The room is compared ignoring capitals and
+ * spacing; the group keeps it as first written. A door whose hardware differs
+ * gets its own group.
  */
+/** Item -> distinct values, joined with "/" ("22" + "44" -> "22/44"). */
+export function joinValues(a: Record<string, string>, b: Record<string, string>): Record<string, string> {
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) {
+    const seen = (out[k] ?? '').split('/').filter(Boolean);
+    for (const x of v.split('/')) if (x && !seen.includes(x)) seen.push(x);
+    out[k] = seen.join('/');
+  }
+  return out;
+}
+
 export function groupDoors(doors: ParsedQuotationDoor[]): ParsedDoorGroupPreview[] {
   const groupMap = new Map<string, ParsedDoorGroupPreview>();
   const roomsOf = new Map<string, Map<string, string>>(); // key -> ROOM -> room as first written
   const roomQty = new Map<string, Map<string, number>>(); // key -> ROOM -> doors
+  const tagsOf = new Map<string, Map<string, string>>(); // key -> TAG -> tag as first written
   for (const d of doors) {
     const key = makeGroupKey({
-      tag: d.door_tag,
       room: d.room_name,
       classification: d.classification,
       leaf: d.leaf,
@@ -371,12 +485,18 @@ export function groupDoors(doors: ParsedQuotationDoor[]): ParsedDoorGroupPreview
     const qtys = roomQty.get(key) ?? new Map<string, number>();
     roomQty.set(key, qtys);
     qtys.set(roomKey, (qtys.get(roomKey) ?? 0) + d.qty);
+    const tags = tagsOf.get(key) ?? new Map<string, string>();
+    tagsOf.set(key, tags);
+    const tag = d.door_tag.trim();
+    if (tag && !tags.has(tag.toUpperCase())) tags.set(tag.toUpperCase(), tag);
 
     const existing = groupMap.get(key);
     if (existing) {
       existing.door_qty += d.qty;
       existing.source_rows.push(d.source_row);
+      existing.prep_values = joinValues(existing.prep_values ?? {}, d.prep_values ?? {});
       existing.room_name = [...rooms.values()].join(' / ');
+      existing.door_tag = [...tags.values()].join(' / ');
     } else {
       groupMap.set(key, {
         position: groupMap.size + 1,
@@ -392,6 +512,8 @@ export function groupDoors(doors: ParsedQuotationDoor[]): ParsedDoorGroupPreview
         match_room: d.room_name,
         extra_hinges: d.extra_hinges,
         activities: d.activities,
+        lock_cost: d.lock_cost,
+        prep_values: { ...d.prep_values },
       });
     }
   }
@@ -404,7 +526,20 @@ export function groupDoors(doors: ParsedQuotationDoor[]): ParsedDoorGroupPreview
     }
     g.match_room = roomsOf.get(key)?.get(best) ?? g.room_name;
   }
-  return Array.from(groupMap.values());
+  // Numbered A–Z by room name (then rating, leaf, size, first row), not in
+  // the file's order, so every list and the export follow the same order.
+  const text = (a: string | null, b: string | null) =>
+    (a ?? '').localeCompare(b ?? '', undefined, { numeric: true, sensitivity: 'base' });
+  return Array.from(groupMap.values())
+    .sort(
+      (a, b) =>
+        text(a.room_name, b.room_name) ||
+        text(a.classification, b.classification) ||
+        text(a.leaf, b.leaf) ||
+        text(a.door_size, b.door_size) ||
+        a.source_rows[0] - b.source_rows[0]
+    )
+    .map((g, i) => ({ ...g, position: i + 1 }));
 }
 
 /** Issues worked out from all the doors: the sheet total, and groups split by hardware. */
@@ -439,10 +574,10 @@ function summaryIssues(
     });
   }
 
-  // One door type split by hardware: say so, so the groups aren't a surprise.
+  // One room's doors split by hardware: say so, so the groups aren't a surprise.
   const byBase = new Map<string, ParsedDoorGroupPreview[]>();
   for (const g of groups) {
-    const base = typicalDoorOf(g.group_key);
+    const base = `${typicalDoorOf(g.group_key)} | ${parseGroupKey(g.group_key).room}`;
     byBase.set(base, [...(byBase.get(base) ?? []), g]);
   }
   for (const split of byBase.values()) {
@@ -476,6 +611,10 @@ function buildReport(r: Omit<QuotationParseResult, 'report'>): Record<string, un
     warningCount: r.issues.filter((i) => i.severity === 'warning').length,
     errorCount: r.issues.filter((i) => i.severity === 'error').length,
     excluded: r.excluded.slice(0, 100).map((e) => ({ row: e.row, reason: e.reason, qty: e.qty })),
+    variationRowCount: r.variationRows.length,
+    variationDoorsRemoved: r.variationRows.filter((v) => v.kind === 'removed').reduce((n, v) => n + (v.qty ?? 0), 0),
+    variationDoorsAdded: r.doors.filter((d) => d.variation).reduce((n, d) => n + d.qty, 0),
+    variationRows: r.variationRows.slice(0, 300),
     issues: r.issues.slice(0, 100),
   };
 }
@@ -535,6 +674,11 @@ export async function parseQuotationWorkbook(
 
   const get = (row: ExcelJS.Row, col?: number) =>
     col ? cellToString(row.getCell(col)) : '';
+  // Variation doors are on green rows (an RGB or a theme colour).
+  const themeColors = themeColorsOf(
+    String((wb as unknown as { _themes?: Record<string, string> })._themes?.theme1 ?? '')
+  );
+  const variationRows: VariationRow[] = [];
 
   for (let r = headerRow + 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
@@ -560,7 +704,21 @@ export async function parseQuotationWorkbook(
     const leaf3Width = get(row, cols.leaf3Width);
     const leafs = get(row, cols.leafs);
     const schedComments = get(row, cols.scheduleComments);
-    const menaComments = get(row, cols.menaComments);
+    // A comment typed once but merged across the comment columns is read once
+    // (in the cell it starts in).
+    const ownComment = (c?: number) => {
+      if (!c) return '';
+      const cell = row.getCell(c);
+      return cell.isMerged && cell.master.address !== cell.address ? '' : get(row, c);
+    };
+    const menaComments = [...new Set(cols.menaCommentCols.map(ownComment).filter(Boolean))].join(' | ');
+    // Comments in blue or red, by text (the rest are black).
+    const commentColors: Record<string, 'blue' | 'red'> = {};
+    for (const c of [cols.scheduleComments, ...cols.menaCommentCols]) {
+      const text = ownComment(c).trim();
+      const color = c && text ? fontColorOf(row.getCell(c), themeColors) : null;
+      if (color && !commentColors[text]) commentColors[text] = color;
+    }
     // EXTRA HINGE (FR): 9 per extra hinge on the door (a double with 18 has one per leaf).
     const extraHingeRaw = Number(get(row, cols.extraHinge));
     const extraHinges = cols.extraHinge
@@ -585,6 +743,12 @@ export async function parseQuotationWorkbook(
     const rawRef = [doorLevel, doorApt, doorType].filter(Boolean).join(' · ') || `Row ${r}`;
     const qtyNum = Number(qtyRaw);
     const qtyOk = !isPlaceholder(qtyRaw) && Number.isInteger(qtyNum) && qtyNum > 0;
+    const rowCells = [cols.roomName, cols.doorType, cols.doorLevel].flatMap((c) => (c ? [row.getCell(c).fill] : []));
+    const variation = rowCells.some((f) => isGreenFill(f, themeColors));
+    const redRow = !variation && rowCells.some((f) => isRedFill(f, themeColors));
+    if ((variation || redRow) && roomName) {
+      variationRows.push({ row: r, rawRef, room_name: roomName, qty: qtyOk ? qtyNum : null, kind: redRow ? 'removed' : 'added' });
+    }
 
     // The door's hardware: the hardware columns, then items its comments ask
     // for (kick plate, Vingcard, card reader, viewer). Doors are grouped by it.
@@ -598,14 +762,30 @@ export async function parseQuotationWorkbook(
       ...commentItems([schedComments, menaComments].join(' ')),
       extraHinges ? `Extra hinge ×${extraHinges}` : '',
     ]
-      .filter(Boolean)
+      // A column and a comment can name the same item (Kick plate): once.
+      .filter((v, i, all) => v && all.indexOf(v) === i)
       .join(' · ');
 
     const activityRaw: DoorActivities = {};
+    const prepValues: Record<string, string> = {};
     for (const [key, col] of cols.activities) {
       const v = Number(get(row, col));
-      if (Number.isFinite(v) && v > 0) activityRaw[key] = Math.max(activityRaw[key] ?? 0, v);
+      if (Number.isFinite(v) && v > 0) {
+        activityRaw[key] = Math.max(activityRaw[key] ?? 0, v);
+        Object.assign(prepValues, joinValues(prepValues, { [ACTIVITY_LABEL[key]]: String(v) }));
+      }
     }
+    if (extraHinges) prepValues['Extra hinge'] = String(extraHingeRaw);
+
+    // LOCK PREP / LOCK INST: the numbers say which lock (15 non-lockable, 25 mortice).
+    const lockNum = (col?: number) => {
+      const v = col ? get(row, col) : '';
+      const n = Number(v);
+      return v && Number.isFinite(n) && n > 0 ? String(n) : '';
+    };
+    const lockPrep = lockNum(cols.lockPrep);
+    const lockInst = lockNum(cols.lockInst);
+    const lockCost = !lockPrep && !lockInst ? '' : lockPrep === lockInst || !lockInst ? lockPrep : !lockPrep ? lockInst : `${lockPrep}/${lockInst}`;
 
     const makeDoor = (cleanEx: boolean): ParsedQuotationDoor => {
       const clean = (s: string) => (cleanEx ? s.replace(/\s*\(ex\.?\)\s*/gi, ' ').trim() : s.trim());
@@ -623,8 +803,14 @@ export async function parseQuotationWorkbook(
         hardware,
         extra_hinges: extraHinges,
         comments: [schedComments, menaComments].filter(Boolean).join(' | '),
+        schedule_comments: schedComments,
+        mena_comments: menaComments,
+        comment_colors: { ...commentColors },
         // Raw costs for now; turned into quantities once every row is read.
         activities: { ...activityRaw },
+        lock_cost: lockCost,
+        prep_values: { ...prepValues },
+        variation,
       };
     };
 
@@ -644,7 +830,8 @@ export async function parseQuotationWorkbook(
     ];
     const cellHit = cellMarks.find(([, v]) => isExcludedValue(v));
     const commentHit = commentMarks.find(([, v]) => isWholeDoorExclusionComment(v));
-    const hit = cellHit ?? commentHit;
+    // A red row is a door taken out in a variation, even with a QTY.
+    const hit = cellHit ?? commentHit ?? (redRow ? (['Red row', 'excluded in variation'] as [string, string]) : undefined);
     if (hit) {
       excluded.push({
         row: r,
@@ -664,6 +851,20 @@ export async function parseQuotationWorkbook(
         kind: 'row',
         message: `Kept: the comment mentions something by others / excluded, not the whole door — "${
           mention[1].length > 90 ? `${mention[1].slice(0, 90)}…` : mention[1]
+        }"`,
+        rawRef,
+      });
+    }
+
+    // A comment that needs confirmation: the door is counted, but checked.
+    const unsure = commentMarks.find(([, v]) => NEEDS_CONFIRMATION.test(v));
+    if (unsure && qtyOk) {
+      issues.push({
+        row: r,
+        severity: 'warning',
+        kind: 'row',
+        message: `Needs confirmation — counted, check with the builder: "${
+          unsure[1].length > 90 ? `${unsure[1].slice(0, 90)}…` : unsure[1]
         }"`,
         rawRef,
       });
@@ -739,7 +940,9 @@ export async function parseQuotationWorkbook(
   const rates = activityRates(allDoors.map((d) => ({ raw: d.activities, leaves: leavesOf(d) })));
   for (const d of allDoors) {
     d.activities = activityQuantities(d.activities, leavesOf(d), rates);
-    d.hardware = [d.hardware, activitiesToken(d.activities)].filter(Boolean).join(' · ');
+    d.hardware = [d.hardware, activitiesToken(d.activities), d.lock_cost ? `Lock prep: ${d.lock_cost}` : '']
+      .filter(Boolean)
+      .join(' · ');
   }
 
   const groups = groupDoors(doors);
@@ -761,6 +964,8 @@ export async function parseQuotationWorkbook(
     sheetQtyTotalRow,
     includedRows: [],
     activityColumns: [...new Set(cols.activities.map(([key]) => key))],
+    hardwareHeaders: cols.hardware.map(([label, , header]) => [label, header] as [string, string]),
+    variationRows,
   };
   return { ...result, report: buildReport(result) };
 }

@@ -115,7 +115,9 @@ describe('parseQuotationWorkbook', () => {
     expect(res.totalDoorQty).toBe(4);
     expect(res.excludedCount).toBe(1);
     expect(res.groups).toHaveLength(2);
-    expect(res.groups[0]).toMatchObject({
+    // Numbered A–Z by room name: Bathroom, then Fire Egress.
+    expect(res.groups.map((g) => g.position)).toEqual([1, 2]);
+    expect(res.groups[1]).toMatchObject({
       door_tag: 'D65a',
       room_name: 'Fire Egress - Basement',
       classification: 'FIRE RATED',
@@ -123,7 +125,7 @@ describe('parseQuotationWorkbook', () => {
       door_size: '2340x870',
       door_qty: 3,
     });
-    expect(res.groups[1]).toMatchObject({
+    expect(res.groups[0]).toMatchObject({
       door_tag: 'D10',
       room_name: 'Bathroom',
       classification: 'NON RATED',
@@ -180,7 +182,7 @@ describe('parseQuotationWorkbook', () => {
       [2, 'Closer · Grille: DG'],
       [1, 'Closer'],
     ]);
-    expect(d19[0].group_key).toBe('D19 | * | FIRE RATED | SINGLE | 2340x920 | Closer · Grille: DG');
+    expect(d19[0].group_key).toBe('* | WASTE | FIRE RATED | SINGLE | 2340x920 | Closer · Grille: DG');
     expect(res.issues.some((i) => i.kind === 'group' && i.message.startsWith('Split into 2 door groups'))).toBe(true);
     // Items the comments ask for are part of the door's hardware.
     expect(res.doors[0].hardware).toBe('Closer · ES: ES RS · Card reader · Kick plate');
@@ -190,7 +192,7 @@ describe('parseQuotationWorkbook', () => {
     expect(inc.totalDoorQty).toBe(5);
     expect(inc.excludedCount).toBe(1);
     expect(inc.includedRows).toEqual([9]);
-    expect(inc.groups.map((g) => g.door_tag)).toEqual(['D61c', 'D19', 'D19', 'D20']);
+    expect(inc.groups.map((g) => g.door_tag)).toEqual(['D20', 'D19', 'D19', 'D61c']);
     expect(inc.issues.some((i) => i.kind === 'total')).toBe(false);
     // ...and un-including it goes back; the original parse is unchanged.
     expect(applyRowInclusions(inc, []).totalDoorQty).toBe(4);
@@ -256,6 +258,32 @@ describe('parseQuotationWorkbook', () => {
     expect(res.groups[2].hardware).toBe('Prep: Stop ×2, Closer ×2, Drop seal ×2, Frame seal');
   });
 
+  it('reads every column under the HW heading; a Stop left of QTY is hardware, right of it a cost', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Quotation Test');
+    ws.addRow(['MENA CONTRACTORS PTY LTD']);
+    ws.addRow(['DOOR SCHEDULE']);
+    // Row 3: "HW" over columns 12-15 (Hinge, Stop, Reed Switch, Pull Handle).
+    const band: (string | null)[] = Array(17).fill(null);
+    band[11] = 'HW';
+    ws.addRow(band);
+    ws.mergeCells(3, 12, 3, 15);
+    ws.addRow(['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'Hinge', 'Stop', 'Reed Switch', 'Pull Handle', 'QTY', 'STOP']);
+    ws.addRow([]);
+    ws.addRow(['L1', 'D-03', 'A1', 'Linen', 'ST', '-/-/-', 'SC1', 2040, 770, '-', 1, 'BH', 'YES', '-', 'PH1', 1, null]);
+    ws.addRow(['L2', 'D-03', 'A2', 'Linen', 'ST', '-/-/-', 'SC1', 2040, 770, '-', 1, 'BH', '-', '-', 'PH1', 1, null]);
+    ws.addRow(['L3', 'D-03', 'A3', 'Linen', 'ST', '-/-/-', 'SC1', 2040, 770, '-', 1, 'BH', 'YES', 'YES', 'PH1', 1, 7]);
+    const res = await parseQuotationWorkbook((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+    expect(res.activityColumns).toEqual(['stop']);
+    expect(res.doors.map((d) => d.hardware)).toEqual([
+      'Hinge: BH · Stop · Pull Handle: PH1',
+      'Hinge: BH · Pull Handle: PH1',
+      'Hinge: BH · Stop · Reed switch · Pull Handle: PH1 · Prep: Stop',
+    ]);
+    // The door stop splits the group.
+    expect(res.groups).toHaveLength(3);
+  });
+
   it('throws a clear error when no Door Schedule sheet is found', async () => {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Summary');
@@ -266,7 +294,7 @@ describe('parseQuotationWorkbook', () => {
     );
   });
 
-  it('separates door groups when door tags differ for the same room attributes', async () => {
+  it('merges door types with the same specs and hardware (door type is not a hardware factor)', async () => {
     const headers = [
       'Door Level',
       'Door Type',
@@ -290,16 +318,11 @@ describe('parseQuotationWorkbook', () => {
     const buf = await buildSampleWorkbook('Quotation Test', headers, rows);
     const res = await parseQuotationWorkbook(buf);
 
-    expect(res.groups).toHaveLength(2);
+    expect(res.groups).toHaveLength(1);
     expect(res.groups[0]).toMatchObject({
-      door_tag: 'DR-002',
+      door_tag: 'DR-002 / DR-003',
       room_name: 'Residential Bathroom',
-      door_qty: 3,
-    });
-    expect(res.groups[1]).toMatchObject({
-      door_tag: 'DR-003',
-      room_name: 'Residential Bathroom',
-      door_qty: 3,
+      door_qty: 6,
     });
   });
 
@@ -313,10 +336,10 @@ describe('parseQuotationWorkbook', () => {
     expect(res.doors.map((d) => d.room_name)).toEqual(['Apartments - Bedroom', 'APARTMENTS - BEDROOM']);
     expect(res.groups).toHaveLength(1);
     expect(res.groups[0]).toMatchObject({ room_name: 'Apartments - Bedroom', door_qty: 3 });
-    expect(res.groups[0].group_key).toBe('D02 | * | NON RATED | SINGLE | 2340x870');
+    expect(res.groups[0].group_key).toBe('* | APARTMENTS - BEDROOM | NON RATED | SINGLE | 2340x870');
   });
 
-  it('merges one door type with the same hardware and size across rooms; room names joined', async () => {
+  it('merges door types in the same room with the same specs and hardware; other rooms stay apart', async () => {
     const headers = ['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'Self Closing', 'Bolt', 'QTY'];
     const rows: (string | number | null)[][] = [
       ['L1', 'D62a', 'C', 'Services cupboard', 'ST', '-/-/-', 'SC1', 2340, 620, 620, 2, 'Y', 'Y', 1],
@@ -324,20 +347,74 @@ describe('parseQuotationWorkbook', () => {
       ['L2', 'D62a', 'C', 'SERVICES CUPBOARD', 'ST', '-/-/-', 'SC1', 2340, 620, 620, 2, 'Y', 'Y', 1],
       // Same door type, other size: its own group.
       ['L3', 'D62a', 'C', 'Services cupboard', 'ST', '-/-/-', 'SC1', 2340, 720, 720, 2, 'Y', 'Y', 1],
-      // No door type: grouped per room, not merged.
+      // Other door types and rooms, same specs and hardware: one group.
       ['L4', '-', 'C', 'Store', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, '-', '-', 1],
-      ['L4', '-', 'C', 'Plant', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, '-', '-', 1],
+      ['L4', 'D07', 'C', 'Plant', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, '-', '-', 2],
+      // Same size as those, but a closer: its own group.
+      ['L5', 'D07', 'C', 'Plant', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 'Y', '-', 1],
     ];
     const res = await parseQuotationWorkbook(await buildSampleWorkbook('Quotation Test', headers, rows));
-    expect(res.groups.map((g) => [g.room_name, g.door_qty])).toEqual([
-      ['Services cupboard / Services cupboard - B1 & B2', 5],
-      ['Services cupboard', 1],
-      ['Store', 1],
-      ['Plant', 1],
+    expect(res.groups.map((g) => [g.door_tag, g.room_name, g.door_qty])).toEqual([
+      // A–Z by room; "SERVICES CUPBOARD" is the same room in other capitals.
+      ['D07', 'Plant', 2],
+      ['D07', 'Plant', 1],
+      ['D62a', 'Services cupboard', 2],
+      ['D62a', 'Services cupboard', 1],
+      ['D62a', 'Services cupboard - B1 & B2', 3],
+      ['', 'Store', 1],
     ]);
-    expect(res.groups[0].group_key).toBe('D62a | * | NON RATED | DOUBLE | 2340x620+620 | Closer · Bolt');
-    // Matched on the room with the most doors (3 of 5).
-    expect(res.groups[0].match_room).toBe('Services cupboard - B1 & B2');
-    expect(res.groups[2].group_key).toBe('— | STORE | NON RATED | SINGLE | 2040x820');
+    expect(res.groups[2].group_key).toBe('* | SERVICES CUPBOARD | NON RATED | DOUBLE | 2340x620+620 | Closer · Bolt');
+    expect(res.groups[5].group_key).toBe('* | STORE | NON RATED | SINGLE | 2040x820');
+  });
+
+  it('merges door types in one room (door type is not a hardware factor)', async () => {
+    const headers = ['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'QTY'];
+    const rows: (string | number | null)[][] = [
+      ['L1', 'D-04', 'A1', 'LINEN/ BROOM', 'ST', '-/-/-', 'SC1', 2040, 770, '-', 1, 1],
+      ['L2', 'D-03', 'B1', 'LINEN/ BROOM', 'ST', '-/-/-', 'SC1', 2040, 770, '-', 1, 10],
+    ];
+    const res = await parseQuotationWorkbook(await buildSampleWorkbook('Quotation Test', headers, rows));
+    expect(res.groups).toHaveLength(1);
+    expect(res.groups[0]).toMatchObject({ door_tag: 'D-04 / D-03', room_name: 'LINEN/ BROOM', door_qty: 11 });
+  });
+});
+
+describe('comments columns', () => {
+  it('reads Door Schedule Comments, and the unnamed column after it with Mena Contractors Comments', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Quotation Test');
+    ws.addRow(['MENA CONTRACTORS PTY LTD']);
+    ws.addRow(['DOOR SCHEDULE']);
+    ws.addRow(['', '', '', '', '', '', '', '', '', '', '', 'COMMENTS', 'COMMENTS', 'COMMENTS']);
+    ws.addRow(['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'Door Schedule Comments', '', 'Mena Contractors Comments', 'QTY']);
+    ws.addRow([]);
+    const row = ws.addRow(['L1', 'D-01', 'A1', 'Store', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 'Paint door', 'Door size changed', 'Check on site', 1]);
+    row.getCell(13).font = { color: { argb: 'FFFF0000' } };
+    row.getCell(14).font = { color: { argb: 'FF0070C0' } };
+    row.getCell(12).font = { color: { argb: 'FF000000' } };
+    const res = await parseQuotationWorkbook((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+    expect(res.doors[0]).toMatchObject({
+      schedule_comments: 'Paint door',
+      mena_comments: 'Door size changed | Check on site',
+      comments: 'Paint door | Door size changed | Check on site',
+      // Black isn't listed.
+      comment_colors: { 'Door size changed': 'red', 'Check on site': 'blue' },
+    });
+  });
+});
+
+describe('merged comment cells', () => {
+  it('a Door Schedule comment merged into the middle column is not read as a Mena comment too', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Quotation Test');
+    ws.addRow(['MENA CONTRACTORS PTY LTD']);
+    ws.addRow(['DOOR SCHEDULE']);
+    ws.addRow(['LOCATION']);
+    ws.addRow(['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'Door Schedule Comments', '', 'Mena Contractors Comments', 'QTY']);
+    ws.addRow([]);
+    ws.addRow(['L1', 'D-01', 'A1', 'Store', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 'Door size changed', '', '', 1]);
+    ws.mergeCells('L6:M6');
+    const res = await parseQuotationWorkbook((await wb.xlsx.writeBuffer()) as ArrayBuffer);
+    expect(res.doors[0]).toMatchObject({ schedule_comments: 'Door size changed', mena_comments: '' });
   });
 });

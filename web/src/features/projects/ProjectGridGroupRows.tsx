@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Flag, MessageSquare, Plus, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Flag, MessageSquare, Plus, Trash2, Split } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import type { DoorGroup, ProjectLine } from '@/types/database'
 import { groupKeyHardware } from '@/features/projects/groupKey'
@@ -67,6 +67,11 @@ interface GroupRowsFragmentProps {
   /** Clears a line's review flag (the estimator has checked it). */
   onClearFlag?: (line: ProjectLine) => void
   onMoveLine: (line: ProjectLine, dir: -1 | 1) => void
+  /** Ticked to merge with other groups (editable drafts only). */
+  selected?: boolean
+  onToggleSelect?: () => void
+  /** The group was merged: split it back into the groups it was made from. */
+  onUnmerge?: () => void
 }
 
 const CELL = 'border border-neutral-300 px-2 py-0.5'
@@ -88,6 +93,9 @@ export function GroupRowsFragment({
   onDeleteLine,
   onMoveLine,
   onClearFlag,
+  selected = false,
+  onToggleSelect,
+  onUnmerge,
 }: GroupRowsFragmentProps) {
   const rowRef = useRef<HTMLTableRowElement | null>(null)
 
@@ -115,7 +123,29 @@ export function GroupRowsFragment({
       >
         <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
           <span className="inline-flex items-center gap-2">
+            {onToggleSelect && (
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-neutral-950"
+                checked={selected}
+                onChange={onToggleSelect}
+                aria-label={`Select ${group.room_name} to merge`}
+                title="Select to merge with other door groups"
+              />
+            )}
             {group.room_name}
+            {onUnmerge && (
+              <button
+                type="button"
+                onClick={onUnmerge}
+                className="inline-flex items-center gap-1 rounded border border-neutral-300 bg-white px-1.5 py-px text-[10px] font-semibold text-neutral-700 hover:bg-neutral-50"
+                title={`Merged from ${(group.merged_from ?? []).map((p) => `${p.room_name} (${Number(p.door_qty)})`).join(', ')}`}
+                aria-label={`Unmerge ${group.room_name}`}
+              >
+                <Split className="h-2.5 w-2.5" />
+                Unmerge
+              </button>
+            )}
             {onOpenComments && commentCount > 0 && (
               <button
                 type="button"

@@ -6,6 +6,7 @@ import {
   Check,
   Download,
   Loader2,
+  Merge,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { GridSkeleton } from '@/components/ui/skeleton'
@@ -32,6 +33,8 @@ import {
 import { DELIVERY_PER_DOOR } from '@/features/projects/pricing'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { MergeGroupsDialog } from '@/features/projects/MergeGroupsDialog'
+import { planMerge, type MergePlan } from '@/features/projects/mergeGroups'
 
 interface ProjectGridPanelProps {
   /** Display name with reference no. (file name, title strip). */
@@ -300,6 +303,33 @@ export function ProjectGridPanel({
     onRegisterSavePending?.(savePendingEdits)
     return () => onRegisterSavePending?.(null)
   }, [onRegisterSavePending, savePendingEdits])
+
+  // Merge / unmerge door groups (merge_door_groups / unmerge_door_group).
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set())
+  const [mergeOpen, setMergeOpen] = useState(false)
+  const [mergeBusy, setMergeBusy] = useState(false)
+  const [mergeError, setMergeError] = useState<string | null>(null)
+  // Worked out when the dialog opens (the ticked groups and their lines then).
+  const [mergePlan, setMergePlan] = useState<MergePlan | null>(null)
+  // A new version or sheet starts with nothing selected.
+  useEffect(() => setSelectedGroupIds(new Set()), [activeVersion?.id])
+  const toggleGroupSelected = useCallback((groupId: string) => {
+    setSelectedGroupIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(groupId)) next.delete(groupId)
+      else next.add(groupId)
+      return next
+    })
+  }, [])
+  const refreshGroups = useCallback(async () => {
+    const vid = activeVersion?.id
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['door_groups', vid] }),
+      queryClient.invalidateQueries({ queryKey: ['project_lines', vid] }),
+      queryClient.invalidateQueries({ queryKey: ['version_comments', vid] }),
+      queryClient.invalidateQueries({ queryKey: ['project', activeVersion?.project_id] }),
+    ])
+  }, [activeVersion?.id, activeVersion?.project_id, queryClient])
 
   // Warn before closing the tab while edits are still unsaved.
   useEffect(() => {
@@ -618,6 +648,48 @@ export function ProjectGridPanel({
 
   const markupFactor = 1 + markupPct / 100
   const totalDoors = groups.reduce((sum, g) => sum + Number(g.door_qty), 0)
+
+  const selectedGroups = groups.filter((g) => selectedGroupIds.has(g.id))
+  const sheetNameOf = (sheetId: string) => sheets.find((x) => x.id === sheetId)?.name ?? 'Sheet'
+
+  const handleMerge = async (roomName: string, include: Set<string>) => {
+    if (!mergePlan) return
+    setMergeBusy(true)
+    setMergeError(null)
+    try {
+      if (!(await savePendingEdits())) throw new Error('Save the pending edits first (see the error above).')
+      const { keep, copy } = mergePlan.resolve(include)
+      const { error } = await supabase.rpc('merge_door_groups', {
+        p_target: mergePlan.target.id,
+        p_others: mergePlan.others.map((g) => g.id),
+        p_room_name: roomName,
+        p_keep_line_ids: keep,
+        p_copy_line_ids: copy,
+      })
+      if (error) throw error
+      setMergeOpen(false)
+      setSelectedGroupIds(new Set())
+      await refreshGroups()
+    } catch (err) {
+      setMergeError((err as Error).message)
+    } finally {
+      setMergeBusy(false)
+    }
+  }
+
+  const handleUnmerge = async (group: DoorGroup) => {
+    const parts = group.merged_from ?? []
+    const list = parts.map((p) => `${p.room_name} (${Number(p.door_qty)})`).join(', ')
+    if (!window.confirm(`Unmerge into ${parts.length} door groups: ${list}? Each keeps this group's current hardware.`)) return
+    setSaveError(null)
+    if (!(await savePendingEdits())) return
+    const { error } = await supabase.rpc('unmerge_door_group', { p_group: group.id })
+    if (error) {
+      setSaveError(error.message)
+      return
+    }
+    await refreshGroups()
+  }
   const groupById = new Map(groups.map((g) => [g.id, g]))
   const projectTotal = sheetLines.reduce((sum, l) => {
     if (l.unit_price === null) return sum
@@ -883,6 +955,32 @@ export function ProjectGridPanel({
               {editable && ' • Arrow keys move, Enter/F2 edit, Tab next, Esc cancel'}
             </div>
             <div className="flex items-center gap-4 text-xs">
+              {editable && selectedGroupIds.size > 0 && (
+                <span className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-7"
+                    disabled={selectedGroups.length < 2}
+                    onClick={() => {
+                      setMergeError(null)
+                      setMergePlan(planMerge(selectedGroups, lines))
+                      setMergeOpen(true)
+                    }}
+                    title={selectedGroups.length < 2 ? 'Tick at least two door groups' : undefined}
+                  >
+                    <Merge className="h-3.5 w-3.5" />
+                    <span>Merge {selectedGroups.length} groups</span>
+                  </Button>
+                  <button
+                    type="button"
+                    className="text-[11px] text-neutral-600 underline hover:text-neutral-950"
+                    onClick={() => setSelectedGroupIds(new Set())}
+                  >
+                    Clear
+                  </button>
+                </span>
+              )}
               {editable && sheetSupplierId && (
                 <label
                   className="flex items-center gap-1.5 text-[11px] text-neutral-700 select-none"
@@ -1032,6 +1130,11 @@ export function ProjectGridPanel({
                     onMoveLine={(line, dir) =>
                       void handleMoveLine(group.id, line, dir)
                     }
+                    selected={selectedGroupIds.has(group.id)}
+                    onToggleSelect={editable ? () => toggleGroupSelected(group.id) : undefined}
+                    onUnmerge={
+                      editable && (group.merged_from?.length ?? 0) >= 2 ? () => void handleUnmerge(group) : undefined
+                    }
                   />
                 )
               })}
@@ -1041,6 +1144,16 @@ export function ProjectGridPanel({
           </div>
         </div>
       )}
+
+      <MergeGroupsDialog
+        open={mergeOpen}
+        onOpenChange={setMergeOpen}
+        plan={mergePlan}
+        sheetName={sheetNameOf}
+        busy={mergeBusy}
+        error={mergeError}
+        onConfirm={(roomName, include) => void handleMerge(roomName, include)}
+      />
 
       {activeVersion && (
         <ExportExcelDialog

@@ -16,7 +16,14 @@
  * every door in the group asks for it and the set doesn't already have it
  * (by legend or by what the line says it is); when only some doors ask, a note
  * says so instead.
+ *
+ * The PREPARATION / INSTALLATION cost columns always decide: an HW column
+ * (Self Closing, Stop, Bolt) without a cost is only a note (an option for the
+ * estimator), never a part. Electrical items aren't Mena's scope: they stay on
+ * the door with no price and "BY OTHERS" (markByOthers). A comment that needs
+ * confirmation flags the door for review (it's still counted).
  */
+import type { ActivityKey, DoorActivities } from './doorActivities'
 import { toPartIndex, type PartIndex, type SizingLine, type SizingPart } from './doorSizing'
 
 export interface FlagDoor {
@@ -83,6 +90,8 @@ interface FlagRule {
   perLeaf?: boolean
   /** Legends that count as already having the item (any kick plate size). */
   family?: RegExp
+  /** The cost column that decides instead, when the quotation has it. */
+  costKey?: ActivityKey
   /** A line whose description says this is the same item (parts without a legend). */
   same: RegExp
 }
@@ -109,8 +118,21 @@ export const FLAG_RULES: FlagRule[] = [
   {
     label: 'Reed switch (ES column)',
     part: { legend: 'RS' },
-    wants: (d) => /\bRS\b/i.test(strikeValue(d)),
+    // "RS" in the Electric Strike column, or the Reed Switch column under HW.
+    wants: (d) =>
+      /\bRS\b/i.test(strikeValue(d)) ||
+      d.hardware.split(' · ').some((t) => t === 'Reed switch' || t.startsWith('Reed switch: ')),
     same: /reed\s*switch/i,
+  },
+  {
+    // The Stop column under HW: "YES" (token "Stop") or a value ("Stop: WM").
+    // The standard sets' floor stop, one per leaf.
+    label: 'Door stop (Stop column)',
+    part: { sku: 'MMDOORSTOP' },
+    wants: (d) => d.hardware.split(' · ').some((t) => t === 'Stop' || t.startsWith('Stop: ')),
+    perLeaf: true,
+    costKey: 'stop',
+    same: /door\s*stop/i,
   },
   {
     label: 'Kick plate (comment)',
@@ -134,6 +156,60 @@ export const FLAG_RULES: FlagRule[] = [
   },
 ]
 
+/** HW columns that have a cost column: the cost decides, the HW column is an option. */
+const HW_WITH_COST: Array<{ label: string; column: string; key: ActivityKey; cost: string }> = [
+  { label: 'Closer', column: 'Self Closing', key: 'closer', cost: 'CLOSER' },
+  { label: 'Stop', column: 'Stop', key: 'stop', cost: 'STOP' },
+  { label: 'Bolt', column: 'Bolt', key: 'bolt', cost: 'BARREL BOLTS / AUTO FLUSH BOLTS' },
+]
+
+/** The HW column's value on a door ("YES" for a bare token), or ''. */
+function hwValue(hardware: string, label: string): string {
+  const t = hardware.split(' · ').find((x) => x === label || x.startsWith(`${label}: `))
+  return t === undefined ? '' : t === label ? 'YES' : t.slice(label.length + 2)
+}
+
+/** A comment that needs someone to confirm the door ("NEED CONFIRMATION IF DOOR IS INCLUDED", "TBC"). */
+export const NEEDS_CONFIRMATION =
+  /\bneeds?\s+(to\s+)?confirm(ation|ed)?\b|\bto\s+be\s+confirmed\b|\bTBC\b|\bTBA\b|\bconfirm\s+(if|whether)\b|\bplease\s+confirm\b/i
+
+/**
+ * Electrical items: not Mena's scope (on the door with no price, BY OTHERS).
+ * "NON-ELECTRIC" doesn't count.
+ */
+export const ELECTRICAL =
+  /(?<!\bnon[\s-]?)\belectric(al)?\b|\belectro\s*-?\s*magnet|card\s*reader|reed\s*switch|ving\s*card|access\s*control|mag(netic)?\s*lock|exit\s*button|\bREX\b|intercom|door\s*contact|security\s*contractor|cable\s*transfer|power\s*transfer/i
+
+/** The parts library folder for electrical items supplied by others. */
+export const BY_OTHERS_FOLDER = /electronic|by\s+others/i
+
+/**
+ * Electrical lines (electric strike, card reader, reed switch, Vingcard…):
+ * no price and "BY OTHERS" in the remarks. Returns the lines and a note per item.
+ */
+export function markByOthers<L extends SizingLine & { mhqt_remarks?: string }>(
+  lines: L[],
+  parts: SizingPart[] | PartIndex,
+): { lines: L[]; notes: string[] } {
+  const { byId, bySku } = toPartIndex(parts)
+  const notes: string[] = []
+  const out = lines.map((l) => {
+    const part = (l.part_id ? byId.get(l.part_id) : undefined) ?? bySku.get(l.sku.trim().toUpperCase())
+    const inFolder = BY_OTHERS_FOLDER.test(part?.folder ?? '')
+    if (!inFolder && !ELECTRICAL.test(`${l.description} ${part?.description ?? ''}`)) return l
+    notes.push(`${l.sku}: electrical — no price, BY OTHERS`)
+    return { ...l, unit_price: 0, mhqt_remarks: l.mhqt_remarks?.trim() ? l.mhqt_remarks : 'BY OTHERS' }
+  })
+  return { lines: out, notes }
+}
+
+export interface FlagOptions {
+  /** Cost columns the quotation has (they decide over the HW columns). */
+  costColumns?: ActivityKey[]
+  /** The group's priced activities. */
+  activities?: DoorActivities
+}
+
 export interface FlaggedLines<L> {
   lines: L[]
   notes: string[]
@@ -145,9 +221,12 @@ export function applyFlagRules<L extends SizingLine>(
   leaves: number,
   parts: SizingPart[] | PartIndex,
   makeLine: (part: SizingPart, qty: number) => L,
+  options: FlagOptions = {},
 ): FlaggedLines<L> {
   const total = doors.reduce((s, d) => s + d.qty, 0)
   if (total === 0) return { lines, notes: [] }
+  const costColumns = options.costColumns ?? []
+  const activities = options.activities ?? {}
   const { byId: partById, bySku: partBySku, active } = toPartIndex(parts)
   const partOf = (l: SizingLine) =>
     (l.part_id ? partById.get(l.part_id) : undefined) ?? partBySku.get(l.sku.trim().toUpperCase())
@@ -155,7 +234,26 @@ export function applyFlagRules<L extends SizingLine>(
 
   const out = [...lines]
   const notes: string[] = []
+
+  // Comments that need confirmation: counted, but flagged for review.
+  const unsure = [...new Set(doors.flatMap((d) =>
+    d.comments.split(' | ').map((c) => c.trim()).filter((c) => NEEDS_CONFIRMATION.test(c)),
+  ))]
+  for (const c of unsure) notes.push(`Needs confirmation: "${c}" — counted, check with the builder`)
+
+  // HW columns the cost columns don't price: an option, not a part.
+  for (const hw of HW_WITH_COST) {
+    if (!costColumns.includes(hw.key) || (activities[hw.key] ?? 0) > 0) continue
+    const values = [...new Set(doors.map((d) => hwValue(d.hardware, hw.label)).filter(Boolean))]
+    if (values.length === 0) continue
+    notes.push(
+      `${hw.column} column says ${values.map((v) => `"${v}"`).join(' / ')} but there's no ${hw.cost} cost — not added (option: add it by hand)`,
+    )
+  }
+
   for (const rule of FLAG_RULES) {
+    // The cost column decides (activityRules.ts); the HW column is only a note above.
+    if (rule.costKey && costColumns.includes(rule.costKey)) continue
     const wanting = doors.filter(rule.wants).reduce((s, d) => s + d.qty, 0)
     if (wanting === 0) continue
     const part =

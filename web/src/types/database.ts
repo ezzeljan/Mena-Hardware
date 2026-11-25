@@ -196,8 +196,17 @@ export interface DoorGroup {
   match_score: number | null
   match_reason: string
   pm_remarks: string
+  /** Groups this one was merged from (migration 026); empty when not merged. */
+  merged_from?: MergedFromPart[]
   created_at: string
   updated_at: string
+}
+
+export interface MergedFromPart {
+  group_key: string
+  room_name: string
+  door_qty: number
+  door_tag?: string
 }
 
 export interface ProjectLine {

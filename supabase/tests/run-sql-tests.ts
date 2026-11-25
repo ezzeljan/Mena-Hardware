@@ -27,6 +27,7 @@ async function runTests(): Promise<void> {
     path.resolve(__dirname, './part_folders.test.sql'),
     path.resolve(__dirname, './delete_quote.test.sql'),
     path.resolve(__dirname, './line_review_flag.test.sql'),
+    path.resolve(__dirname, './merge_door_groups.test.sql'),
   ]
 
   const isLocalDb = databaseUrl.includes('127.0.0.1') || databaseUrl.includes('localhost')
