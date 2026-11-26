@@ -25,7 +25,8 @@ import {
 } from '@/lib/schemas'
 import { formatCurrency } from '@/lib/utils'
 import type { Part, StandardSet, StandardSetLine } from '@/types/database'
-import { SkuAutocomplete } from './SkuAutocomplete'
+import { GENERIC_OPTION_PREFIX, SkuAutocomplete } from './SkuAutocomplete'
+import type { GenericItem } from '@/features/projects/genericParts'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -85,7 +86,7 @@ export function StandardSetDetailPage() {
       const { data, error } = await supabase
         .from('standard_sets')
         .select(
-          'id, room_name, classification, leaf, door_size, active, created_at, updated_at, standard_set_lines(id, set_id, position, sku, description, qty, unit_price, created_at, updated_at)',
+          'id, room_name, classification, leaf, door_size, active, created_at, updated_at, standard_set_lines(id, set_id, position, sku, description, qty, unit_price, generic_id, created_at, updated_at)',
         )
         .eq('id', id!)
         .single()
@@ -108,6 +109,44 @@ export function StandardSetDetailPage() {
           .range(from, to),
       ),
   })
+
+  // Generic items ("PASSAGE SET LEVER ROUND"): what sets name; a quotation
+  // import swaps each for the supplier's part (migration 027).
+  const genericQuery = useQuery({
+    queryKey: ['generic_items'],
+    queryFn: async (): Promise<GenericItem[]> => {
+      const { data, error } = await supabase
+        .from('generic_items')
+        .select('id, code, description, folder_id, active')
+        .order('description', { ascending: true })
+      if (error) throw error
+      return (Array.isArray(data) ? data : []) as GenericItem[]
+    },
+  })
+  const genericByCode = useMemo(
+    () => new Map((genericQuery.data ?? []).map((g) => [g.code.trim().toUpperCase(), g])),
+    [genericQuery.data],
+  )
+  // The line picker lists generic items first, then parts. A library part
+  // with a generic item's code (the old placeholder parts) is left out: it
+  // would be listed twice and saved as the generic item anyway.
+  const pickerOptions = useMemo((): Part[] => {
+    const active = (genericQuery.data ?? []).filter((g) => g.active)
+    const codes = new Set(active.map((g) => g.code.trim().toUpperCase()))
+    const generics = active
+      .map((g) => ({
+        id: `${GENERIC_OPTION_PREFIX}${g.id}`,
+        sku: g.code,
+        description: g.description,
+        supplier_id: '',
+        unit_cost: null,
+        active: true,
+        created_at: '',
+        updated_at: '',
+      })) as unknown as Part[]
+    const parts = (partsQuery.data ?? []).filter((p) => !codes.has(p.sku.trim().toUpperCase()))
+    return [...generics, ...parts]
+  }, [genericQuery.data, partsQuery.data])
 
   const sortedLines = useMemo(() => {
     const raw = setQuery.data?.standard_set_lines ?? []
@@ -147,6 +186,17 @@ export function StandardSetDetailPage() {
       const parsed = standardSetLineSchema.parse(values)
       const qtyNum = Number(parsed.qty.trim())
       const nullablePrice = parseNullablePriceInput(parsed.unit_price)
+      // A generic item's code links the line to it; anything else names a part.
+      // An edit that keeps the SKU keeps the line's link as it is.
+      const sku = parsed.sku.trim().toUpperCase()
+      let genericId: string | null
+      if (editingLine && editingLine.sku.trim().toUpperCase() === sku) {
+        genericId = editingLine.generic_id ?? null
+      } else {
+        // Without the generic items, a generic code would be saved as a part.
+        if (!genericQuery.isSuccess) throw new Error('Still loading the generic items — try again in a moment.')
+        genericId = genericByCode.get(sku)?.id ?? null
+      }
 
       if (editingLine) {
         const { error } = await supabase
@@ -156,6 +206,7 @@ export function StandardSetDetailPage() {
             description: parsed.description.trim(),
             qty: qtyNum,
             unit_price: nullablePrice,
+            generic_id: genericId,
           })
           .eq('id', editingLine.id)
         if (error) throw error
@@ -172,6 +223,7 @@ export function StandardSetDetailPage() {
           description: parsed.description.trim(),
           qty: qtyNum,
           unit_price: nullablePrice,
+          generic_id: genericId,
         })
         if (error) throw error
       }
@@ -611,7 +663,7 @@ export function StandardSetDetailPage() {
               <SkuAutocomplete
                 id="line-sku"
                 value={currentSkuValue}
-                parts={partsQuery.data ?? []}
+                parts={pickerOptions}
                 onChange={(sku) =>
                   lineForm.setValue('sku', sku, { shouldValidate: true })
                 }
@@ -620,6 +672,8 @@ export function StandardSetDetailPage() {
                   lineForm.setValue('description', part.description, {
                     shouldValidate: true,
                   })
+                  // A generic item has no price of its own: keep the line's.
+                  if (part.id.startsWith(GENERIC_OPTION_PREFIX)) return
                   lineForm.setValue(
                     'unit_price',
                     part.unit_cost === null || part.unit_cost === undefined

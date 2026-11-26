@@ -1,8 +1,9 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ArrowUp, Flag, MessageSquare, Plus, Trash2, Split } from 'lucide-react'
 import { formatCurrency } from '@/lib/utils'
 import type { DoorGroup, ProjectLine } from '@/types/database'
-import { groupKeyHardware } from '@/features/projects/groupKey'
+import { DoorGroupPopover } from '@/features/projects/DoorGroupPopover'
+import type { GroupQuoteInfo } from '@/features/projects/groupQuoteInfo'
 import { Button } from '@/components/ui/button'
 
 /** Editable grid columns: 0 sku, 1 description, 2 qty_per_door, 3 unit cost, 4 MHQT remarks. */
@@ -72,6 +73,8 @@ interface GroupRowsFragmentProps {
   onToggleSelect?: () => void
   /** The group was merged: split it back into the groups it was made from. */
   onUnmerge?: () => void
+  /** What the quotation said about the group (the room name's popover); null when not kept. */
+  quoteInfo?: GroupQuoteInfo | null
 }
 
 const CELL = 'border border-neutral-300 px-2 py-0.5'
@@ -96,8 +99,12 @@ export function GroupRowsFragment({
   selected = false,
   onToggleSelect,
   onUnmerge,
+  quoteInfo = null,
 }: GroupRowsFragmentProps) {
   const rowRef = useRef<HTMLTableRowElement | null>(null)
+  const roomRef = useRef<HTMLButtonElement | null>(null)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const flaggedCount = groupLines.filter((l) => l.review_flag?.trim()).length
 
   useEffect(() => {
     if (highlighted) rowRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
@@ -133,7 +140,36 @@ export function GroupRowsFragment({
                 title="Select to merge with other door groups"
               />
             )}
-            {group.room_name}
+            {/* The quotation's details, flagged lines and the import's notes. */}
+            <button
+              ref={roomRef}
+              type="button"
+              onClick={() => setDetailsOpen((o) => !o)}
+              className="underline decoration-neutral-400 decoration-dotted underline-offset-2 hover:decoration-neutral-950"
+              aria-expanded={detailsOpen}
+              aria-haspopup="dialog"
+              title="Show what the quotation says, flagged lines and suggestions"
+            >
+              {group.room_name}
+            </button>
+            {flaggedCount > 0 && (
+              <span
+                className="inline-flex items-center gap-0.5 rounded-full bg-orange-100 px-1.5 py-px text-[10px] font-semibold text-orange-700"
+                title={`${flaggedCount} line${flaggedCount === 1 ? '' : 's'} flagged for review`}
+              >
+                <Flag className="h-2.5 w-2.5" aria-hidden="true" />
+                {flaggedCount}
+              </span>
+            )}
+            {detailsOpen && roomRef.current && (
+              <DoorGroupPopover
+                group={group}
+                info={quoteInfo}
+                lines={groupLines}
+                anchor={roomRef.current}
+                onClose={() => setDetailsOpen(false)}
+              />
+            )}
             {onUnmerge && (
               <button
                 type="button"
@@ -172,13 +208,8 @@ export function GroupRowsFragment({
         <td className="border border-neutral-300 px-2 py-1 whitespace-nowrap">
           {group.leaf || ''}
         </td>
-        {/* The hardware every door in the group has (from the quotation's hardware columns). */}
-        <td
-          className="border border-neutral-300 px-2 py-1 text-[11px] font-normal text-neutral-600"
-          title={groupKeyHardware(group.group_key) ? 'Hardware from the quotation' : undefined}
-        >
-          {groupKeyHardware(group.group_key)}
-        </td>
+        {/* LEGEND: only the parts' legends (the quotation's hardware is in the room name's popover). */}
+        <td className="border border-neutral-300 px-2 py-1" />
         <td className="border border-neutral-300 px-2 py-1" />
         <td className="border border-neutral-300 px-2 py-1" />
         {/* As in the Excel export: the label in DESCRIPTION, only the number in QTY. */}

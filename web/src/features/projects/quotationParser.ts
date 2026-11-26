@@ -98,6 +98,17 @@ export interface ParseIssue {
   rawRef?: string;
   /** 'row': about one row. 'total' / 'group': worked out from all doors (recomputed on include). */
   kind?: 'row' | 'total' | 'group';
+  /** A room's doors split into door groups by hardware: each group (shown as its own row). */
+  splits?: IssueSplit[];
+}
+
+export interface IssueSplit {
+  position: number;
+  door_tag: string;
+  door_qty: number;
+  source_rows: number[];
+  hardware: string;
+  prep_values?: Record<string, string>;
 }
 
 /** A row left out of scope, with why. Rows with a numeric QTY can be included again. */
@@ -587,10 +598,17 @@ function summaryIssues(
       row: g.source_rows[0],
       severity: 'warning',
       kind: 'group',
-      rawRef: [g.door_tag, g.room_name].filter(Boolean).join(' · '),
-      message: `Split into ${split.length} door groups because the hardware differs: ${split
-        .map((s) => `${s.door_qty} × ${s.hardware || 'no hardware'}`)
-        .join('; ')}.`,
+      // With the size: several groups can share a room name.
+      rawRef: [g.door_tag, g.room_name, g.door_size].filter(Boolean).join(' · '),
+      message: `Split into ${split.length} door groups because the hardware differs.`,
+      splits: split.map((s) => ({
+        position: s.position,
+        door_tag: s.door_tag,
+        door_qty: s.door_qty,
+        source_rows: [...s.source_rows],
+        hardware: s.hardware,
+        prep_values: s.prep_values,
+      })),
     });
   }
   return issues;
@@ -655,14 +673,30 @@ export function applyRowInclusions(
   return { ...next, report: buildReport(next) };
 }
 
+/** Where parsing is up to, for a progress display. */
+export type ParseStage = 'open' | 'sheet' | 'rows' | 'group';
+export interface ParseProgress {
+  stage: ParseStage;
+  /** Rows read so far and in all (stage 'rows'). */
+  done?: number;
+  total?: number;
+}
+
 export async function parseQuotationWorkbook(
-  buffer: ArrayBuffer | Uint8Array
+  buffer: ArrayBuffer | Uint8Array,
+  onProgress?: (p: ParseProgress) => void,
 ): Promise<QuotationParseResult> {
+  onProgress?.({ stage: 'open' });
   const ExcelJSLib = await loadExcelJS();
   const wb = new ExcelJSLib.Workbook();
   await wb.xlsx.load(buffer as ArrayBuffer);
 
+  onProgress?.({ stage: 'sheet' });
   const { ws, headerRow, cols } = findQuotationSheet(wb);
+  const rowTotal = Math.max(0, ws.rowCount - headerRow);
+  onProgress?.({ stage: 'rows', done: 0, total: rowTotal });
+  // About every 1% of the rows (enough for a smooth bar, not a message per row).
+  const rowStep = Math.max(20, Math.ceil(rowTotal / 100));
 
   const doors: ParsedQuotationDoor[] = [];
   const issues: ParseIssue[] = [];
@@ -682,6 +716,7 @@ export async function parseQuotationWorkbook(
 
   for (let r = headerRow + 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
+    if (onProgress && (r - headerRow) % rowStep === 0) onProgress({ stage: 'rows', done: r - headerRow, total: rowTotal });
 
     // The sheet's own total: the largest SUM / SUBTOTAL in the QTY column, so
     // per-level subtotals aren't mistaken for the grand total.
@@ -945,6 +980,7 @@ export async function parseQuotationWorkbook(
       .join(' · ');
   }
 
+  onProgress?.({ stage: 'group' });
   const groups = groupDoors(doors);
   issues.push(...summaryIssues(doors, groups, excluded, new Set(), sheetQtyTotal, sheetQtyTotalRow));
   const totalDoorQty = doors.reduce((sum, d) => sum + d.qty, 0);

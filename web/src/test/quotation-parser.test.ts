@@ -183,7 +183,10 @@ describe('parseQuotationWorkbook', () => {
       [1, 'Closer'],
     ]);
     expect(d19[0].group_key).toBe('* | WASTE | FIRE RATED | SINGLE | 2340x920 | Closer · Grille: DG');
-    expect(res.issues.some((i) => i.kind === 'group' && i.message.startsWith('Split into 2 door groups'))).toBe(true);
+    const split = res.issues.find((i) => i.kind === 'group' && i.message.startsWith('Split into 2 door groups'));
+    // Each door group it was split into, for its own row in the Issues tab.
+    expect(split?.splits?.map((g) => g.hardware)).toEqual(expect.arrayContaining(['Closer · Grille: DG']));
+    expect(split?.splits).toHaveLength(2);
     // Items the comments ask for are part of the door's hardware.
     expect(res.doors[0].hardware).toBe('Closer · ES: ES RS · Card reader · Kick plate');
 
@@ -416,5 +419,24 @@ describe('merged comment cells', () => {
     ws.mergeCells('L6:M6');
     const res = await parseQuotationWorkbook((await wb.xlsx.writeBuffer()) as ArrayBuffer);
     expect(res.doors[0]).toMatchObject({ schedule_comments: 'Door size changed', mena_comments: '' });
+  });
+});
+
+describe('parse progress', () => {
+  it('reports open, sheet, rows (counted) and group, in order', async () => {
+    const headers = ['Door Level', 'Door Type', 'Door Apt #', 'Room Name', 'Frame Type', 'FRL', 'Leaf Type', 'Leaf Height', 'Leaf 1 Width', 'Leaf 2 Width', 'Leafs', 'QTY'];
+    const rows = Array.from({ length: 45 }, (_, i) => ['L1', `D-${i}`, 'A1', 'Store', 'ST', '-/-/-', 'SC1', 2040, 820, '-', 1, 1]);
+    const seen: string[] = [];
+    let lastRows = 0;
+    await parseQuotationWorkbook(await buildSampleWorkbook('Quotation Test', headers, rows), (p) => {
+      if (seen[seen.length - 1] !== p.stage) seen.push(p.stage);
+      if (p.stage === 'rows') {
+        expect(p.done ?? 0).toBeGreaterThanOrEqual(lastRows);
+        lastRows = p.done ?? 0;
+        expect(p.total).toBeGreaterThanOrEqual(45);
+      }
+    });
+    expect(seen).toEqual(['open', 'sheet', 'rows', 'group']);
+    expect(lastRows).toBeGreaterThan(0);
   });
 });

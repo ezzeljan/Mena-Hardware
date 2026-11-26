@@ -11,7 +11,7 @@ const scope = self as unknown as WorkerScope
 
 scope.onmessage = async (event) => {
   try {
-    const result = await parseQuotationWorkbook(event.data)
+    const result = await parseQuotationWorkbook(event.data, (progress) => scope.postMessage({ progress }))
     scope.postMessage({ ok: true, result })
   } catch (err) {
     scope.postMessage({

@@ -28,6 +28,11 @@ const StandardSetsPage = lazy(() =>
     default: m.StandardSetsPage,
   })),
 )
+const GenericItemsPage = lazy(() =>
+  import('@/features/standard-sets/GenericItemsPage').then((m) => ({
+    default: m.GenericItemsPage,
+  })),
+)
 const StandardSetDetailPage = lazy(() =>
   import('@/features/standard-sets/StandardSetDetailPage').then((m) => ({
     default: m.StandardSetDetailPage,
@@ -87,6 +92,7 @@ export default function App() {
               <Route path="/suppliers/:id" element={<SupplierProductsPage />} />
               <Route path="/manufacturers" element={<Navigate to="/suppliers" replace />} />
               <Route path="/standard-sets" element={<StandardSetsPage />} />
+              <Route path="/standard-sets/generic" element={<GenericItemsPage />} />
               <Route
                 path="/standard-sets/:id"
                 element={<StandardSetDetailPage />}

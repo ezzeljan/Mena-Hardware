@@ -73,6 +73,8 @@ export interface StandardSetLine {
   description: string
   qty: number
   unit_price: number | null
+  /** The generic item the line stands for (migration 027); null when it names a part. */
+  generic_id?: string | null
   created_at: string
   updated_at: string
 }

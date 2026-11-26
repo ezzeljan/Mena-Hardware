@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { chromium, expect, test, type Page, type Route } from '@playwright/test'
 import ExcelJS from 'exceljs'
 import { parseQuotationWorkbook } from '../src/features/projects/quotationParser'
 
@@ -349,6 +349,9 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
   })
   await page.route('**/rest/v1/parts**', (route) => json(route, partsList))
   await page.route('**/rest/v1/standard_sets**', (route) => json(route, standardSets))
+  // Generic set items (migration 027): none unless a test adds them.
+  await page.route('**/rest/v1/generic_items**', (route) => json(route, []))
+  await page.route('**/rest/v1/generic_item_parts**', (route) => json(route, []))
   await page.route('**/storage/v1/object/quotations/**', (route) =>
     json(route, { Key: 'quotations/mock-file.xlsx' }),
   )
@@ -450,6 +453,16 @@ async function mockSupabase(page: Page, role: Role, seed: Partial<MockState> = {
   )
   await page.route('**/rest/v1/quotation_doors**', (route) =>
     route.request().method() === 'GET' ? json(route, state.quotationDoors ?? []) : json(route, [], 201),
+  )
+
+  // Mirrors write_quotation_content (migration 028): each group's quote_info.
+  await page.route('**/rest/v1/quotation_group_info**', (route) =>
+    json(
+      route,
+      state.doorGroups
+        .filter((g) => g.quote_info)
+        .map((g) => ({ group_key: g.group_key, info: g.quote_info })),
+    ),
   )
 
   await page.route('**/rest/v1/door_groups**', async (route) => {
@@ -997,6 +1010,8 @@ test('Assigned estimator re-imports an updated quotation: unchanged groups keep 
         leaf: 'SINGLE', door_size: baseParse.groups[0].door_size ?? '', door_qty: 2,
         matched_set_id: SET_FIRE_ID, match_status: 'confirmed', match_score: 1, match_reason: '',
         pm_remarks: 'Check closer finish', created_at: TS, updated_at: TS,
+        // v1's quotation details (the mock serves these as quotation_group_info).
+        quote_info: { doors: ['DR-001'], hardware: '', headers: [], prep_values: {}, comments: [], notes: ['Closer: added 505BC+SLC (priced in the quotation)'] },
       },
     ],
     lines: [
@@ -1052,6 +1067,8 @@ test('Assigned estimator re-imports an updated quotation: unchanged groups keep 
   expect(fire.pm_remarks).toBe('Check closer finish')
   expect(fire.carried_from_group_id).toBe('group-v1-1')
   expect(fire.lines).toEqual([])
+  // Its lines are v1's, so it keeps v1's notes (the popover's suggestions).
+  expect((fire.quote_info as { notes: string[] }).notes).toEqual(['Closer: added 505BC+SLC (priced in the quotation)'])
   const bath = groups.find((g) => g.group_key !== fireKey)!
   expect(bath.carried_from_group_id).toBeUndefined()
   expect(bath.lines).toEqual([expect.objectContaining({ sku: 'MMHINGE', origin: 'set' })])
@@ -1413,6 +1430,44 @@ test('Hardware grid: horizontal scrollbar and sheet tabs pinned to the bottom of
   expect(Math.abs(Number(gap))).toBeLessThanOrEqual(2)
 })
 
+test.describe('on a 125% scaled screen', () => {
+  test('Hardware grid: dragging the pinned scrollbar moves the grid smoothly (no jumping back)', async ({ baseURL }) => {
+    // Real (draggable) scrollbars, which headless Chromium hides by default,
+    // on a screen scaled to 125% (scroll positions land between pixels).
+    const browser = await chromium.launch({ ignoreDefaultArgs: ['--hide-scrollbars'] })
+    const context = await browser.newContext({ baseURL, deviceScaleFactor: 1.25, viewport: { width: 900, height: 420 } })
+    const page = await context.newPage()
+    await mockSupabase(page, 'estimator', COMMENT_SEED('draft'))
+    await signIn(page, 'estimator')
+    await page.goto(`/projects/${PROJECT_ID}/hardware`)
+    await expect(page.getByRole('columnheader', { name: 'MHQT REMARKS' })).toBeAttached()
+    const hscroll = page.getByTestId('grid-bottom-hscroll')
+    await expect(hscroll).toBeVisible()
+    const box = (await hscroll.boundingBox())!
+
+    // Drag the thumb (past the left arrow) to the right in small steps: the grid moves
+    // with it at every step, and ends where the bar is.
+    const y = box.y + box.height / 2
+    await page.mouse.move(box.x + 30, y)
+    await page.mouse.down()
+    const seen: number[] = []
+    for (let i = 1; i <= 30; i++) {
+      await page.mouse.move(box.x + 30 + i * 5.3, y)
+      // After two frames: the grid follows in the bar's scroll event.
+      seen.push(Number(await page.evaluate(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(document.querySelector('[data-testid=hardware-grid-scroll]').scrollLeft))))`)))
+    }
+    await page.mouse.up()
+    expect(seen[seen.length - 1]).toBeGreaterThan(0)
+    // Every step moves it (the old two-way copy swallowed every other one).
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThan(seen[i - 1])
+    const [grid, bar] = (await page.evaluate(
+      `[document.querySelector('[data-testid=hardware-grid-scroll]').scrollLeft, document.querySelector('[data-testid=grid-bottom-hscroll]').scrollLeft]`,
+    )) as number[]
+    expect(Math.abs(grid - bar)).toBeLessThan(1)
+    await browser.close()
+  })
+})
+
 test('Hardware grid: merge door groups (choosing hardware not in both) and unmerge', async ({ page }) => {
   const seed = COMMENT_SEED('draft')
   seed.doorGroups = [
@@ -1532,9 +1587,8 @@ test('Import page: the Variation tab lists green rows and the door group each ad
     buffer: await buildSampleQuotationBuffer([FIRE_ROW(2), VARY_FIRE, VARY_PLANT, VARY_NO_QTY, RED_ROW], [1, 2, 3], [4]),
   })
 
-  await expect(page.getByTestId('variation-summary')).toContainText(
-    '2 doors added (QTY filled); 1 row without a QTY not counted; 1 door excluded (red rows)',
-  )
+  // No separate variation banner: the Variation tab says it.
+  await expect(page.getByTestId('variation-summary')).toHaveCount(0)
   // Between Parsed Rows and Excluded.
   const tabs = page.getByRole('button', { name: /^(Parsed Rows|Variation|Excluded)/ })
   await expect(tabs).toHaveText([/Parsed Rows/, 'Variation (2 added, 1 excluded)', 'Excluded (1)'])
@@ -1629,6 +1683,13 @@ test('Import page: filter the Matching Review list by door group and status', as
   await page.getByLabel('Filter by status').selectOption('manual')
   await expect(plant).toBeVisible()
   await expect(fire).toHaveCount(0)
+  // A group being edited stays listed even when it stops matching the
+  // status filter (here manual -> unmatched -> custom again, typing a name).
+  await plant.selectOption({ label: '— Unmatched —' })
+  await expect(plant).toBeVisible()
+  await plant.selectOption({ label: 'Custom (Type door group...)' })
+  await page.getByLabel('Custom door group for Plant Room - Fire Pump').fill('PUMP ROOM')
+  await expect(page.getByLabel('Custom door group for Plant Room - Fire Pump')).toHaveValue('PUMP ROOM')
   // The set / custom name counts too.
   await page.getByLabel('Filter by status').selectOption('ALL')
   await page.getByLabel('Filter door groups').fill('pump room')
@@ -1921,6 +1982,10 @@ test('Import page: custom door groups can be picked again (typed here or saved i
   // Type a new custom group on one row...
   await plant.selectOption({ label: 'Custom (Type door group...)' })
   await page.getByLabel('Custom door group for Plant Room - Fire Pump').fill('PUMP ROOM')
+  // With no standard set, its hardware is built from the door and the quotation's cells.
+  const plantRow = page.getByRole('row').filter({ hasText: 'Plant Room - Fire Pump' })
+  await expect(plantRow.getByTestId('schedule-notes')).toContainText('No standard set')
+  await expect(plantRow.getByTestId('schedule-notes')).toContainText('hardware built from the quotation')
 
   // ...and pick it on another, without typing.
   await fire.selectOption({ label: 'Custom: PUMP ROOM' })
@@ -2052,4 +2117,150 @@ test('Hardware grid: stays a skeleton until the lines are in (no door groups wit
   await expect(page.getByText('Loading the hardware grid…')).toBeAttached()
   await expect(page.getByText('MMHINGE')).toBeVisible({ timeout: 10000 })
   expect(await page.evaluate('window.flash')).toBe(0)
+})
+
+test('Import page: once parsed, the drop area is replaced by "Upload again", which brings it back', async ({ page }) => {
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/import?builder=Bolt%20Construct&supplier=${SUPPLIER_ID}`)
+  const drop = page.getByText('Drop a Mena quotation .xlsx file here, or click to browse')
+  await expect(drop).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Back' })).toBeDisabled()
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'Bolt.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: await buildSampleQuotationBuffer([FIRE_ROW(2)]),
+  })
+  await expect(page.getByTestId('parsed-file')).toContainText('Bolt.xlsx')
+  await expect(drop).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Back' })).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'Upload again' }).click()
+  await expect(drop).toBeVisible()
+  await expect(page.getByTestId('parsed-file')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Back' })).toBeDisabled()
+})
+
+test("Import: a set's generic item becomes the first sheet supplier's preferred part", async ({ page }) => {
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  // The bathroom set names a generic item; MM's preferred part for it is MM-PRIVSET.
+  const GENERIC_ID = 'gggggggg-gggg-gggg-gggg-ggggggggggg1'
+  const privPart = {
+    id: '55555555-5555-5555-5555-555555555559', sku: 'MM-PRIVSET', supplier_id: SUPPLIER_ID,
+    description: 'MM PRIVACY SET LEVER ROUND', unit_cost: 31, active: true, folder_id: null,
+    created_at: TS, updated_at: TS, suppliers: supplier,
+  }
+  const sets = standardSets.map((s) =>
+    s.id === SET_BATH_ID
+      ? {
+          ...s,
+          standard_set_lines: [
+            ...s.standard_set_lines,
+            {
+              id: 'line-std-4', set_id: SET_BATH_ID, position: 2, sku: 'PRIVSET35LRBR',
+              description: 'PRIVACY SET 35 LEVER ROUND B ROSE', qty: 1, unit_price: 20,
+              part_id: null, generic_id: GENERIC_ID,
+            },
+          ],
+        }
+      : s,
+  )
+  await page.route('**/rest/v1/standard_sets**', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(sets) }),
+  )
+  await page.route('**/rest/v1/parts**', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([...partsList, privPart]) }),
+  )
+  await page.route('**/rest/v1/generic_items**', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { id: GENERIC_ID, code: 'PRIVSET35LRBR', description: 'PRIVACY SET 35 LEVER ROUND B ROSE', folder_id: null, active: true },
+      ]),
+    }),
+  )
+  await page.route('**/rest/v1/generic_item_parts**', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([{ generic_id: GENERIC_ID, supplier_id: SUPPLIER_ID, part_id: privPart.id }]),
+    }),
+  )
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}`)
+  await importQuotation(page)
+
+  // The quote names the part, not the generic item.
+  await expect(page.getByText('MM-PRIVSET')).toBeVisible()
+  await expect(page.getByText('PRIVSET35LRBR')).toHaveCount(0)
+})
+
+test("Import: Create waits for the generic items; if they don't load, it offers a retry instead of saving", async ({ page }) => {
+  await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  let fail = true
+  await page.route('**/rest/v1/generic_items**', (route) =>
+    fail
+      ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ message: 'boom' }) })
+      : route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+  )
+  await page.route('**/rest/v1/generic_item_parts**', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+  )
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}/import?builder=Bolt%20Construct&supplier=${SUPPLIER_ID}`)
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'Bolt.xlsx',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: await buildSampleQuotationBuffer(),
+  })
+  await page.getByRole('button', { name: 'Next' }).click()
+  await page.getByRole('button', { name: /Confirm Auto Matches/ }).click()
+  await page.getByRole('button', { name: 'Next' }).click()
+
+  // TanStack Query retries a failed query before giving up.
+  const retry = page.getByRole('button', { name: "Parts didn't load — retry" })
+  await expect(retry).toBeVisible({ timeout: 15000 })
+  fail = false
+  await retry.click()
+  await expect(page.getByRole('button', { name: 'Create Version 1' })).toBeEnabled()
+})
+
+test("Hardware grid: the room name opens the door group's quotation details, flagged lines and notes", async ({ page }) => {
+  const state = await mockSupabase(page, 'estimator', {
+    project: existingProject(PM_ID),
+    estimators: [assignedEstimator(PM_ID)],
+  })
+  await signIn(page, 'estimator')
+  await page.goto(`/projects/${PROJECT_ID}`)
+  await importQuotation(page)
+
+  // Saved with the import: the group's doors.
+  const groups = (state.lastImport?.p_groups ?? []) as Array<{ room_name: string; quote_info?: { doors: string[] } }>
+  expect(groups.find((g) => g.room_name === 'Fire Egress - Basement')?.quote_info?.doors).toEqual(['Basement 01 · FS · DR-001'])
+
+  const room = page.getByRole('button', { name: 'Fire Egress - Basement' })
+  await room.click()
+  const popover = page.getByTestId('door-group-popover')
+  await expect(popover).toBeVisible()
+  await expect(popover).toContainText('Fire Egress - Basement')
+  await expect(popover).toContainText('DR-001')
+  await expect(popover.getByTestId('popover-quotation')).toContainText('From the quotation')
+  await expect(popover.getByTestId('popover-flagged')).toContainText('Flagged for review')
+  // Escape closes it; so does clicking outside.
+  await page.keyboard.press('Escape')
+  await expect(popover).toHaveCount(0)
+  await room.click()
+  await expect(popover).toBeVisible()
+  await page.mouse.click(5, 5)
+  await expect(popover).toHaveCount(0)
 })

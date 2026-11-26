@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronRight, Layers, Plus, Search } from 'lucide-react'
+import { ChevronRight, Layers, Plus, Search, Shapes } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/features/auth/AuthContext'
@@ -154,25 +154,33 @@ export function StandardSetsPage() {
           </p>
         </div>
 
-        {isAdmin && (
-          <Button
-            size="sm"
-            onClick={() => {
-              setFormError(null)
-              form.reset({
-                room_name: '',
-                classification: 'FIRE RATED',
-                leaf: 'SINGLE',
-                door_size: '2040 x 920',
-                active: true,
-              })
-              setCreateDialogOpen(true)
-            }}
-          >
-            <Plus className="h-4 w-4" />
-            <span>New Standard Set</span>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" asChild>
+            <Link to="/standard-sets/generic">
+              <Shapes className="h-4 w-4" />
+              <span>Generic Items</span>
+            </Link>
           </Button>
-        )}
+          {isAdmin && (
+            <Button
+              size="sm"
+              onClick={() => {
+                setFormError(null)
+                form.reset({
+                  room_name: '',
+                  classification: 'FIRE RATED',
+                  leaf: 'SINGLE',
+                  door_size: '2040 x 920',
+                  active: true,
+                })
+                setCreateDialogOpen(true)
+              }}
+            >
+              <Plus className="h-4 w-4" />
+              <span>New Standard Set</span>
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Filters */}

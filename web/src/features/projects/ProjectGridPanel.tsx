@@ -34,6 +34,7 @@ import { DELIVERY_PER_DOOR } from '@/features/projects/pricing'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { MergeGroupsDialog } from '@/features/projects/MergeGroupsDialog'
+import { combineGroupQuoteInfo, readGroupQuoteInfo, type GroupQuoteInfo } from '@/features/projects/groupQuoteInfo'
 import { planMerge, type MergePlan } from '@/features/projects/mergeGroups'
 
 interface ProjectGridPanelProps {
@@ -136,6 +137,22 @@ export function ProjectGridPanel({
       hScrollRef.current.scrollLeft = gridScrollRef.current.scrollLeft
     }
   }, [showHScroll])
+  // The grid and the pinned bar follow each other. Setting one's scrollLeft
+  // fires its own scroll event; copying that back (often a fraction of a
+  // pixel off on scaled screens) fought the drag and made it jump. So the
+  // scroll we caused is skipped, and nothing is copied when they already agree.
+  const echoRef = useRef<{ el: 'grid' | 'bar'; left: number } | null>(null)
+  const followScroll = useCallback((from: 'grid' | 'bar', left: number) => {
+    const echo = echoRef.current
+    if (echo && echo.el === from && Math.abs(echo.left - left) < 1) {
+      echoRef.current = null
+      return
+    }
+    const to = from === 'grid' ? hScrollRef.current : gridScrollRef.current
+    if (!to || Math.abs(to.scrollLeft - left) < 1) return
+    echoRef.current = { el: from === 'grid' ? 'bar' : 'grid', left }
+    to.scrollLeft = left
+  }, [])
   const isDraft = activeVersion?.status === 'draft'
   const editable = canEdit && isDraft
 
@@ -175,6 +192,32 @@ export function ProjectGridPanel({
   })
 
   const groups = useMemo(() => groupsQuery.data ?? [], [groupsQuery.data])
+
+  // What the quotation said about each group (the room name's popover), by group key.
+  const uploadId = activeVersion?.upload_id ?? null
+  const quoteInfoQuery = useQuery({
+    queryKey: ['quotation_group_info', uploadId],
+    enabled: !!uploadId,
+    queryFn: async (): Promise<Map<string, GroupQuoteInfo>> => {
+      const rows = await fetchAllRows<{ group_key: string; info: unknown }>((from, to) =>
+        supabase.from('quotation_group_info').select('group_key, info').eq('upload_id', uploadId!).range(from, to),
+      )
+      const map = new Map<string, GroupQuoteInfo>()
+      for (const r of rows) {
+        const info = readGroupQuoteInfo(r.info)
+        if (info) map.set(r.group_key, info)
+      }
+      return map
+    },
+  })
+
+  // A merged group: the details of every group it was made from.
+  const quoteInfoOf = (group: DoorGroup): GroupQuoteInfo | null => {
+    const byKey = quoteInfoQuery.data
+    if (!byKey) return null
+    const keys = (group.merged_from?.length ?? 0) >= 2 ? group.merged_from!.map((p) => p.group_key) : [group.group_key]
+    return combineGroupQuoteInfo(keys.map((k) => byKey.get(k)).filter((i): i is GroupQuoteInfo => !!i))
+  }
 
   const projectLinesQuery = useQuery({
     queryKey: ['project_lines', activeVersion?.id],
@@ -1050,7 +1093,7 @@ export function ProjectGridPanel({
           <div
             ref={setGridScroll}
             onScroll={(e) => {
-              if (hScrollRef.current && showHScroll) hScrollRef.current.scrollLeft = e.currentTarget.scrollLeft
+              if (showHScroll) followScroll('grid', e.currentTarget.scrollLeft)
             }}
             style={{ marginBottom: -hBarHeight }}
             className="max-h-[max(18rem,calc(100dvh_-_9rem))] overflow-auto"
@@ -1135,6 +1178,7 @@ export function ProjectGridPanel({
                     onUnmerge={
                       editable && (group.merged_from?.length ?? 0) >= 2 ? () => void handleUnmerge(group) : undefined
                     }
+                    quoteInfo={quoteInfoOf(group)}
                   />
                 )
               })}
@@ -1212,9 +1256,7 @@ export function ProjectGridPanel({
         <div
           ref={hScrollRef}
           aria-hidden="true"
-          onScroll={(e) => {
-            if (gridScrollRef.current) gridScrollRef.current.scrollLeft = e.currentTarget.scrollLeft
-          }}
+          onScroll={(e) => followScroll('bar', e.currentTarget.scrollLeft)}
           className={`overflow-x-auto overflow-y-hidden border-x border-neutral-400 bg-white ${showHScroll ? '' : 'hidden'}`}
           data-testid="grid-bottom-hscroll"
         >

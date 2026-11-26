@@ -17,7 +17,6 @@ import {
   Sparkles,
   Upload,
   X,
-  Check,
   Merge,
   Search,
   Split,
@@ -26,7 +25,6 @@ import { supabase } from '@/lib/supabase'
 import { fetchAllRows } from '@/lib/fetchAll'
 import { changeCounts, compareDoors, type DoorChanges, type DoorRecord } from '@/features/projects/doorChanges'
 import { DoorChangesSummary } from '@/features/projects/DoorChangesSummary'
-import { hardwareParts } from '@/features/projects/hardwareParts'
 import { useAuth } from '@/features/auth/AuthContext'
 import type {
   DoorGroup,
@@ -43,7 +41,6 @@ import {
 import {
   applyRowInclusions,
   type ParsedDoorGroupPreview,
-  type ParsedQuotationDoor,
   type QuotationParseResult,
 } from '@/features/projects/quotationParser'
 import {
@@ -55,10 +52,16 @@ import {
 } from '@/features/projects/doorSizing'
 import { applyFlagRules, markByOthers } from '@/features/projects/doorFlags'
 import { applyHingeType } from '@/features/projects/hingeRules'
+import { resolveGenericItem, type GenericItem, type GenericPreference } from '@/features/projects/genericParts'
+import { fetchVersionSheets } from '@/features/projects/projectData'
 import { applyActivityRules } from '@/features/projects/activityRules'
 import { applyLockRules } from '@/features/projects/lockRules'
 import { makeGroupFinder } from '@/features/projects/groupKey'
 import { parseQuotationInBackground } from '@/features/projects/quotationParseClient'
+import { ParsingProgress, type ImportProgress } from '@/features/projects/ParsingProgress'
+import { SplitGroupsTable } from '@/features/projects/SplitGroupsTable'
+import { CommentsCell, HardwareCell, NoteList } from '@/features/projects/quotationDisplay'
+import { startingLines } from '@/features/projects/customGroupLines'
 import {
   AUTO_MATCH_THRESHOLD,
   matchDoorGroup,
@@ -67,6 +70,8 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { buildGroupQuoteInfo, readGroupQuoteInfo } from '@/features/projects/groupQuoteInfo'
+import { CustomGroupInput } from '@/features/projects/CustomGroupInput'
 import { Stepper, type StepperStep } from '@/components/ui/stepper'
 import {
   Table,
@@ -142,131 +147,6 @@ interface SetLineDraft {
   mhqt_remarks?: string
 }
 
-function ItemList({ items, className = 'text-neutral-600', testId }: { items: string[]; className?: string; testId: string }) {
-  if (items.length === 0) return <span className="text-neutral-400">—</span>
-  return (
-    <ul className={`space-y-0.5 text-[11px] ${className}`} data-testid={testId}>
-      {items.map((t, i) => (
-        <li key={`${t}-${i}`} className="whitespace-nowrap">
-          {t}
-        </li>
-      ))}
-    </ul>
-  )
-}
-
-/**
- * A door's hardware, one item per line, in groups: "Builder" (the door
- * schedule's HW columns, named as in the quotation; a YES shows a check mark),
- * items the comments ask for, then "Prep / Install" (the PREPARATION /
- * INSTALLATION items).
- */
-function HardwareCell({
-  hardware,
-  headers,
-  prepValues,
-  className = 'text-neutral-600',
-}: {
-  hardware: string | null | undefined
-  headers: Array<[string, string]>
-  prepValues?: Record<string, string>
-  className?: string
-}) {
-  const { builder, comments, prep } = hardwareParts(hardware ?? '', headers, prepValues)
-  if (builder.length === 0 && comments.length === 0 && prep.length === 0) {
-    return <span className="text-neutral-400">—</span>
-  }
-  return (
-    <div className="space-y-1">
-      {builder.length > 0 && (
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">Builder</div>
-          <ul className={`space-y-0.5 text-[11px] ${className}`} data-testid="hardware-items">
-            {builder.map((b) => (
-              <li key={b.header} className="flex items-center gap-1 whitespace-nowrap">
-                {b.value === null ? (
-                  <>
-                    <Check className="h-3 w-3 shrink-0 text-green-700" aria-label="Yes" />
-                    {b.header}
-                  </>
-                ) : (
-                  <>
-                    {b.header}: <span className="font-mono font-semibold">{b.value}</span>
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {comments.length > 0 && (
-        <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">From Comments</div>
-          <ItemList items={comments} className={className} testId="comment-items" />
-        </div>
-      )}
-      {prep.length > 0 && (
-        <div className={builder.length + comments.length > 0 ? 'border-t border-dashed border-neutral-300 pt-1' : ''}>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">Prep / Install</div>
-          <ItemList items={prep} className={className} testId="prep-items" />
-        </div>
-      )}
-    </div>
-  )
-}
-
-/**
- * A door's or group's quotation comments, each once, in two groups: Door
- * Schedule Comments, then Mena Contractors Comments.
- */
-function CommentsCell({ doors }: { doors: Array<ParsedQuotationDoor | undefined> }) {
-  const distinct = (texts: Array<string | undefined>) => [
-    ...new Set(texts.flatMap((c) => (c ?? '').split(' | ')).map((c) => c.trim()).filter(Boolean)),
-  ]
-  const schedule = distinct(doors.map((d) => d?.schedule_comments))
-  const mena = distinct(doors.map((d) => d?.mena_comments))
-  // As coloured in the quotation: blue, red or black.
-  // A comment's colour on the doors that have it; 'mixed' when they differ.
-  const colorOf = (c: string): 'blue' | 'red' | 'black' | 'mixed' => {
-    const having = doors.filter((d) =>
-      [d?.schedule_comments, d?.mena_comments].some((t) => (t ?? '').split(' | ').map((x) => x.trim()).includes(c)),
-    )
-    const colors = new Set(having.map((d) => d?.comment_colors?.[c] ?? 'black'))
-    return colors.size > 1 ? 'mixed' : ([...colors][0] ?? 'black')
-  }
-  const COLOR_CLASS = {
-    blue: 'text-blue-700',
-    red: 'text-red-600',
-    black: 'text-neutral-900',
-    mixed: 'text-neutral-900 border-l-2 border-amber-400 pl-1',
-  } as const
-  if (schedule.length === 0 && mena.length === 0) return <span className="text-neutral-400">—</span>
-  const group = (title: string, items: string[], testId: string, divided: boolean) => (
-    <div className={divided ? 'border-t border-dashed border-neutral-300 pt-1' : ''} data-testid={testId}>
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400">{title}</div>
-      {items.map((c) => {
-        const color = colorOf(c)
-        return (
-          <div
-            key={c}
-            className={`line-clamp-3 ${COLOR_CLASS[color]}`}
-            title={color === 'mixed' ? `${c} (a different colour on some doors in the quotation)` : c}
-            data-color={color}
-          >
-            {c}
-          </div>
-        )
-      })}
-    </div>
-  )
-  return (
-    <div className="max-w-xs space-y-1 text-[11px] text-neutral-700" data-testid="row-comments">
-      {schedule.length > 0 && group('Door Schedule Comments', schedule, 'schedule-comments', false)}
-      {mena.length > 0 && group('Mena Contractors Comments', mena, 'mena-comments', schedule.length > 0)}
-    </div>
-  )
-}
-
 const WIZARD_STEPS: StepperStep[] = [
   { id: 'upload', title: 'Upload Quotation', description: 'Parse .xlsx schedule' },
   { id: 'matching', title: 'Matching Review', description: 'Door-to-set mapping' },
@@ -302,6 +182,9 @@ export function QuotationImportWizard({
   // Step 1: Upload & parse
   const [isDragging, setIsDragging] = useState(false)
   const [parsing, setParsing] = useState(false)
+  // While parsing: the file and where it's up to (ParsingProgress).
+  const [parsingFile, setParsingFile] = useState<{ name: string; size: number } | null>(null)
+  const [parseProgress, setParseProgress] = useState<ImportProgress>({ stage: 'open' })
   const [previewTab, setPreviewTab] = useState<'groups' | 'doors' | 'variation' | 'excluded' | 'issues'>('groups')
   const [uploadedFile, setUploadedFile] = useState<File | null>(null)
   // baseParse: the file as parsed; parseResult: with any excluded rows the estimator included.
@@ -337,7 +220,7 @@ export function QuotationImportWizard({
       const { data, error } = await supabase
         .from('standard_sets')
         .select(
-          'id, room_name, classification, leaf, door_size, active, created_at, updated_at, standard_set_lines(id, set_id, position, sku, description, qty, unit_price, created_at, updated_at)',
+          'id, room_name, classification, leaf, door_size, active, created_at, updated_at, standard_set_lines(id, set_id, position, sku, description, qty, unit_price, generic_id, created_at, updated_at)',
         )
         .eq('active', true)
         .order('room_name', { ascending: true })
@@ -363,7 +246,13 @@ export function QuotationImportWizard({
       const folderName = new Map(
         (Array.isArray(folders.data) ? (folders.data as Array<{ id: string; name: string }>) : []).map((f) => [f.id, f.name]),
       )
-      return parts.map((p) => ({ ...p, folder: p.folder_id ? folderName.get(p.folder_id) : undefined }))
+      // legend and description are never null in the database; '' guards the rules anyway.
+      return parts.map((p) => ({
+        ...p,
+        legend: p.legend ?? '',
+        description: p.description ?? '',
+        folder: p.folder_id ? folderName.get(p.folder_id) : undefined,
+      }))
     },
   })
 
@@ -422,6 +311,48 @@ export function QuotationImportWizard({
     return map
   }, [standardSets])
 
+  // Generic set items and each supplier's preferred part (migration 027).
+  const genericQuery = useQuery({
+    queryKey: ['generic_items', 'with-preferences'],
+    queryFn: async () => {
+      const [items, prefs] = await Promise.all([
+        supabase.from('generic_items').select('id, code, description, folder_id, active'),
+        supabase.from('generic_item_parts').select('generic_id, supplier_id, part_id'),
+      ])
+      if (items.error) throw items.error
+      if (prefs.error) throw prefs.error
+      return {
+        items: (Array.isArray(items.data) ? items.data : []) as GenericItem[],
+        prefs: (Array.isArray(prefs.data) ? prefs.data : []) as GenericPreference[],
+      }
+    },
+  })
+  // The supplier generic items are quoted from: the first sheet's (a new
+  // quote's chosen supplier, or a re-imported quote's first sheet).
+  const firstSheetQuery = useQuery({
+    queryKey: ['quote_sheets', baseVersion?.id, 'first'],
+    enabled: isReimport && !!baseVersion?.id,
+    queryFn: async () => (await fetchVersionSheets(baseVersion!.id))[0] ?? null,
+  })
+  // Re-import: the replaced upload's notes per group. Unchanged groups keep
+  // their lines, so they keep the notes those lines came with.
+  const baseUploadId = isReimport ? (baseVersion?.upload_id ?? null) : null
+  const baseNotesQuery = useQuery({
+    queryKey: ['quotation_group_info', baseUploadId, 'notes'],
+    enabled: !!baseUploadId,
+    queryFn: async (): Promise<Map<string, string[]>> => {
+      const rows = await fetchAllRows<{ group_key: string; info: unknown }>((from, to) =>
+        supabase.from('quotation_group_info').select('group_key, info').eq('upload_id', baseUploadId!).range(from, to),
+      )
+      return new Map(rows.map((r) => [r.group_key, readGroupQuoteInfo(r.info)?.notes ?? []]))
+    },
+  })
+  const genericSupplierId = supplier?.id ?? firstSheetQuery.data?.supplier_id ?? null
+  const genericById = useMemo(
+    () => new Map((genericQuery.data?.items ?? []).map((g) => [g.id, g])),
+    [genericQuery.data],
+  )
+
   const partBySku = useMemo(() => {
     const map = new Map<string, string>()
     for (const p of partsQuery.data ?? []) {
@@ -448,34 +379,82 @@ export function QuotationImportWizard({
   const sizingCache = useMemo(
     () => new Map<string, SizedLines<SetLineDraft> & { flagNotes: string[] }>(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [partIndex, doorByRow, setById, partBySku],
+    [partIndex, doorByRow, setById, partBySku, genericQuery.data, genericSupplierId],
   )
 
   const sizedLinesByGroup = useMemo(() => {
     const map = new Map<string, SizedLines<SetLineDraft> & { flagNotes: string[] }>()
     for (const m of draftMatches) {
-      if (m.carriedFromGroupId || !m.matchedSetId) continue
+      // Unchanged groups keep their lines; every other group gets lines, from
+      // its set or (unmatched / custom) from the door and the quotation's cells.
+      if (m.carriedFromGroupId) continue
       const cacheKey = `${m.group.group_key}|${m.matchedSetId}|${m.group.source_rows.join(',')}|${m.group.hardware}`
       const cached = sizingCache.get(cacheKey)
       if (cached) {
         map.set(m.group.group_key, cached)
         continue
       }
-      const set = setById.get(m.matchedSetId)
+      const set = m.matchedSetId ? setById.get(m.matchedSetId) : undefined
+      const genericNotes: string[] = []
       const setLines: SetLineDraft[] = [...(set?.standard_set_lines ?? [])]
         .sort((a: StandardSetLine, b: StandardSetLine) => a.position - b.position)
-        .map((line) => ({
-          sku: line.sku,
-          description: line.description,
-          qty_per_door: Number(line.qty),
-          unit_price: line.unit_price,
-          part_id: partBySku.get(line.sku.trim().toUpperCase()) ?? null,
-          origin: 'set' as const,
-        }))
+        .map((line) => {
+          const base = {
+            sku: line.sku,
+            description: line.description,
+            qty_per_door: Number(line.qty),
+            unit_price: line.unit_price,
+            part_id: partBySku.get(line.sku.trim().toUpperCase()) ?? null,
+            origin: 'set' as const,
+          }
+          // A generic item ("PASSAGE SET LEVER ROUND") becomes the supplier's part.
+          const generic = line.generic_id ? genericById.get(line.generic_id) : undefined
+          if (!generic) return base
+          const picked = resolveGenericItem(generic, genericSupplierId, genericQuery.data?.prefs ?? [], {
+            byId: partIndex.byId,
+            all: partIndex.all,
+          }, new Set(), genericQuery.data?.items ?? [])
+          if (!picked) {
+            genericNotes.push(`${generic.description}: no part to quote it with — pick one`)
+            return {
+              ...base,
+              part_id: null,
+              unit_price: null,
+              review_flag: `Generic item (${generic.description}): no part found for this supplier — pick one`,
+            }
+          }
+          if (picked.how !== 'preferred') {
+            genericNotes.push(
+              `${generic.description} → ${picked.part.sku} (${picked.how === 'folder' ? "the supplier's closest part" : 'the default part'})`,
+            )
+          }
+          return {
+            ...base,
+            sku: picked.part.sku,
+            description: picked.part.description,
+            part_id: picked.part.id,
+            unit_price: picked.part.unit_cost ?? line.unit_price,
+          }
+        })
       const doors = m.group.source_rows
         .map((r) => doorByRow.get(r))
         .filter((d): d is NonNullable<typeof d> => !!d)
       const leaves = parseDoorSize(m.group.door_size)?.widths.length ?? 1
+      if (!set) {
+        // No standard set: start from the door (hinges); the rules below add
+        // the rest from the size, rating, Builder HW and prep / install cells.
+        for (const start of startingLines(m.group, leaves, partIndex)) {
+          setLines.push({
+            sku: start.part.sku,
+            description: start.part.description,
+            qty_per_door: start.qty,
+            unit_price: start.part.unit_cost,
+            part_id: start.part.id,
+            origin: 'added',
+          })
+        }
+        genericNotes.push('No standard set: hardware built from the quotation (size, rating, Builder HW, prep / install)')
+      }
       const addedLine = (part: SizingPart, qty: number): SetLineDraft => ({
         sku: part.sku,
         description: part.description,
@@ -521,13 +500,13 @@ export function QuotationImportWizard({
       const sized = { ...sizedRaw, lines: others.lines }
       const entry = {
         ...sized,
-        flagNotes: [...priced.notes, ...locked.notes, ...hinged.notes, ...flagged.notes, ...others.notes],
+        flagNotes: [...genericNotes, ...priced.notes, ...locked.notes, ...hinged.notes, ...flagged.notes, ...others.notes],
       }
       sizingCache.set(cacheKey, entry)
       map.set(m.group.group_key, entry)
     }
     return map
-  }, [draftMatches, setById, partBySku, partIndex, doorByRow, sizingCache, parseResult])
+  }, [draftMatches, setById, partBySku, partIndex, doorByRow, sizingCache, parseResult, genericById, genericQuery.data, genericSupplierId])
 
   // Each group's candidate sets depend only on the parse and the sets, not on
   // the estimator's choices, so they're worked out once per parse.
@@ -639,10 +618,15 @@ export function QuotationImportWizard({
       setStepError('Only .xlsx quotation workbooks are supported.')
       return
     }
+    setParsingFile({ name: file.name, size: file.size })
+    setParseProgress({ stage: 'open' })
     setParsing(true)
     try {
       const buffer = await file.arrayBuffer()
-      const result = await parseQuotationInBackground(buffer)
+      const result = await parseQuotationInBackground(buffer, setParseProgress)
+      // Matching runs on the page: show the step before it starts.
+      setParseProgress({ stage: 'match' })
+      await new Promise<void>((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
       setUploadedFile(file)
       setBaseParse(result)
       setParseResult(result)
@@ -659,6 +643,20 @@ export function QuotationImportWizard({
     } finally {
       setParsing(false)
     }
+  }
+
+  // Back to the drop area for another file. Matching choices made on the next
+  // step would be lost, so ask first when there are any.
+  const uploadAgain = () => {
+    const choices = draftMatches.some(
+      (m) => !m.carriedFromGroupId && (m.matchStatus === 'confirmed' || m.matchStatus === 'manual'),
+    )
+    if (choices && !window.confirm('Upload another file? The matches you confirmed or changed will be lost.')) return
+    setStepError(null)
+    setUploadedFile(null)
+    setBaseParse(null)
+    setParseResult(null)
+    setDraftMatches([])
   }
 
   // Include (or exclude again) an excluded row; groups are worked out again and re-matched.
@@ -742,6 +740,7 @@ export function QuotationImportWizard({
 
   const updateManualMatch = (groupKey: string, setId: string) => {
     setStepError(null)
+    keepVisible(groupKey)
     setDraftMatches((prev) =>
       prev.map((item) => {
         if (item.group.group_key !== groupKey) return item
@@ -804,6 +803,7 @@ export function QuotationImportWizard({
 
   const updateCustomGroupName = (groupKey: string, name: string) => {
     setStepError(null)
+    keepVisible(groupKey)
     setDraftMatches((prev) =>
       prev.map((item) => {
         if (item.group.group_key !== groupKey) return item
@@ -837,9 +837,16 @@ export function QuotationImportWizard({
   // hardware, set) and by status. Bulk buttons still act on every group.
   const [groupFilter, setGroupFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<'ALL' | DraftGroupMatch['matchStatus']>('ALL')
+  // A group being edited stays in the list until the filter changes, even
+  // when the edit means it no longer matches (Unmatched -> Custom).
+  const [keptVisible, setKeptVisible] = useState<Set<string>>(new Set())
+  const keepVisible = (groupKey: string) =>
+    setKeptVisible((prev) => (prev.has(groupKey) ? prev : new Set(prev).add(groupKey)))
+  useEffect(() => setKeptVisible(new Set()), [groupFilter, statusFilter])
   const visibleMatches = useMemo(() => {
     const q = groupFilter.trim().toLowerCase()
     return draftMatches.filter((m) => {
+      if (keptVisible.has(m.group.group_key)) return true
       if (statusFilter !== 'ALL' && m.matchStatus !== statusFilter) return false
       if (!q) return true
       const g = m.group
@@ -847,7 +854,7 @@ export function QuotationImportWizard({
       return [g.room_name, g.door_tag, g.classification, g.leaf, g.door_size, g.hardware, setName]
         .some((v) => (v ?? '').toLowerCase().includes(q))
     })
-  }, [draftMatches, groupFilter, statusFilter, setById])
+  }, [draftMatches, groupFilter, statusFilter, setById, keptVisible])
 
   // Merge / unmerge door groups before saving.
   const [selectedForMerge, setSelectedForMerge] = useState<Set<string>>(new Set())
@@ -918,9 +925,27 @@ export function QuotationImportWizard({
   ).length
   const unmatchedCount = draftMatches.filter((m) => m.matchStatus === 'unmatched').length
 
+  // The lines are built from these: saving before they load would save a
+  // set's generic items as they are, without parts.
+  const lookupsLoading =
+    partsQuery.isPending ||
+    genericQuery.isPending ||
+    standardSetsQuery.isPending ||
+    (isReimport && firstSheetQuery.isPending) ||
+    (!!baseUploadId && baseNotesQuery.isPending)
+  // One failed to load: saving would quote generic items as the old
+  // placeholder parts (their codes are part numbers too), unflagged.
+  const lookupsFailed =
+    partsQuery.isError || genericQuery.isError || standardSetsQuery.isError || (isReimport && firstSheetQuery.isError)
+  const retryLookups = () => {
+    for (const q of [partsQuery, genericQuery, standardSetsQuery, firstSheetQuery]) if (q.isError) void q.refetch()
+  }
+
   const importMutation = useMutation({
     mutationFn: async (): Promise<string> => {
       if (!user) throw new Error('Must be signed in to import a quotation.')
+      if (lookupsLoading) throw new Error('Still loading the parts library — try again in a moment.')
+      if (lookupsFailed) throw new Error("The parts library or generic items didn't load — retry before saving.")
       if (!uploadedFile || !parseResult) {
         throw new Error('Quotation workbook is required.')
       }
@@ -956,6 +981,17 @@ export function QuotationImportWizard({
         source_row: d.source_row,
       }))
 
+      // What the quotation said about each group (doors, hardware, comments,
+      // the rules' notes), for the Hardware grid's door group popover.
+      const quoteInfo = (m: DraftGroupMatch) =>
+        buildGroupQuoteInfo(
+          m.group,
+          m.group.source_rows.map((r) => doorByRow.get(r)).filter((d): d is NonNullable<typeof d> => !!d),
+          hwHeaders,
+          m.carriedFromGroupId
+            ? (baseNotesQuery.data?.get(baseById.get(m.carriedFromGroupId)?.group_key ?? '') ?? [])
+            : (sizedLinesByGroup.get(m.group.group_key)?.flagNotes ?? []),
+        )
       const groups = draftMatches.map((m) => {
         if (m.carriedFromGroupId) {
           // Unchanged group: every sheet keeps its lines (edits and prices), the
@@ -976,6 +1012,7 @@ export function QuotationImportWizard({
             match_reason: m.matchReason,
             pm_remarks: base?.pm_remarks ?? '',
             carried_from_group_id: m.carriedFromGroupId,
+            quote_info: quoteInfo(m),
             lines: [],
           }
         }
@@ -993,6 +1030,7 @@ export function QuotationImportWizard({
           match_status: m.matchStatus,
           match_score: m.matchScore,
           match_reason: m.matchReason,
+          quote_info: quoteInfo(m),
           // The standard set's lines plus flagged items, sized for the door; a
           // blank set price stays null (never 0).
           lines: setLines.map((line, idx) => ({
@@ -1111,9 +1149,6 @@ export function QuotationImportWizard({
     [parseResult, previousDoorsQuery.data],
   )
   const variationAdded = parseResult ? parseResult.doors.filter((d) => d.variation).reduce((n, d) => n + d.qty, 0) : 0
-  const variationUncounted = parseResult
-    ? parseResult.variationRows.filter((v) => v.kind === 'added' && v.qty === null).length
-    : 0
   const variationRemoved = parseResult
     ? parseResult.variationRows.filter((v) => v.kind === 'removed').reduce((n, v) => n + (v.qty ?? 0), 0)
     : 0
@@ -1145,14 +1180,6 @@ export function QuotationImportWizard({
       })
   }, [parseResult])
 
-  const variationPanel = parseResult && parseResult.variationRows.length > 0 && (
-    <div className="border border-green-700 bg-green-50 rounded p-3 text-xs text-green-900" data-testid="variation-summary">
-      <span className="font-semibold">Variation: </span>
-      {variationAdded} door{variationAdded === 1 ? '' : 's'} added (QTY filled)
-      {variationUncounted > 0 && `; ${variationUncounted} row${variationUncounted === 1 ? '' : 's'} without a QTY not counted`}
-      {variationRemoved > 0 && `; ${variationRemoved} door${variationRemoved === 1 ? '' : 's'} excluded (red rows)`}.
-    </div>
-  )
   const doorChangesPanel = doorChanges && baseVersion && (
     <div className="border border-neutral-300 bg-neutral-50 rounded p-3 space-y-1.5">
       <div className="text-xs font-semibold text-neutral-950">
@@ -1297,8 +1324,15 @@ export function QuotationImportWizard({
       )}
 
       {/* STEP 1: Upload Quotation */}
-      {step === 0 && (
+      {step === 0 && parsing && parsingFile && (
+        <div className="mx-auto w-full max-w-2xl pt-2">
+          <ParsingProgress fileName={parsingFile.name} fileSize={parsingFile.size} progress={parseProgress} />
+        </div>
+      )}
+
+      {step === 0 && !(parsing && parsingFile) && (
         <div className="space-y-4 pt-2">
+          {!parseResult && (
           <div
             onDragOver={(e) => {
               e.preventDefault()
@@ -1310,7 +1344,7 @@ export function QuotationImportWizard({
               setIsDragging(false)
               void handleFile(e.dataTransfer.files[0])
             }}
-            className={`border border-dashed rounded-md p-6 text-center transition-colors ${
+            className={`mx-auto w-full max-w-2xl border border-dashed rounded-md px-6 py-12 text-center transition-colors ${
               isDragging
                 ? 'border-neutral-950 bg-neutral-100'
                 : 'border-neutral-300 bg-neutral-50'
@@ -1349,9 +1383,16 @@ export function QuotationImportWizard({
               </Button>
             </div>
           </div>
+          )}
 
           {parseResult && (
             <div className="space-y-4">
+              {uploadedFile && (
+                <div className="flex items-center gap-2 text-sm text-neutral-950" data-testid="parsed-file">
+                  <FileSpreadsheet className="h-4 w-4 shrink-0 text-neutral-500" />
+                  <span className="truncate font-medium">Selected: {uploadedFile.name}</span>
+                </div>
+              )}
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                 <div className="border border-neutral-200 p-2.5 rounded">
                   <div className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold">
@@ -1403,7 +1444,6 @@ export function QuotationImportWizard({
                 </div>
               </div>
 
-              {variationPanel}
               {doorChangesPanel}
 
               <div className="flex items-center gap-2 border-b border-neutral-200 pb-2">
@@ -1451,7 +1491,8 @@ export function QuotationImportWizard({
                 </Button>
               </div>
 
-              <div className="max-h-72 overflow-y-auto border border-neutral-200">
+              {/* Up to 70% of the screen height: the lists are long. */}
+              <div className="max-h-[70vh] overflow-y-auto border border-neutral-200">
                 {previewTab === 'groups' && (
                   <Table>
                     <TableHeader>
@@ -1462,7 +1503,8 @@ export function QuotationImportWizard({
                         <TableHead>Classification</TableHead>
                         <TableHead>Leaf</TableHead>
                         <TableHead>Size</TableHead>
-                        <TableHead>Hardware</TableHead>
+                        <TableHead>Builder HW</TableHead>
+                        <TableHead>Prep / Install</TableHead>
                         <TableHead>Comments</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
                       </TableRow>
@@ -1479,7 +1521,10 @@ export function QuotationImportWizard({
                           <TableCell className="text-xs">{g.leaf ?? '—'}</TableCell>
                           <TableCell className="font-mono text-xs">{g.door_size ?? '—'}</TableCell>
                           <TableCell>
-                            <HardwareCell hardware={g.hardware} headers={hwHeaders} prepValues={g.prep_values} />
+                            <HardwareCell hardware={g.hardware} headers={hwHeaders} prepValues={g.prep_values} part="builder" />
+                          </TableCell>
+                          <TableCell>
+                            <HardwareCell hardware={g.hardware} headers={hwHeaders} prepValues={g.prep_values} part="prep" />
                           </TableCell>
                           <TableCell>
                             <CommentsCell doors={g.source_rows.map((row) => doorByRow.get(row))} />
@@ -1503,7 +1548,8 @@ export function QuotationImportWizard({
                         <TableHead>Classification</TableHead>
                         <TableHead>Leaf</TableHead>
                         <TableHead>Size</TableHead>
-                        <TableHead>Hardware</TableHead>
+                        <TableHead>Builder HW</TableHead>
+                        <TableHead>Prep / Install</TableHead>
                         <TableHead>Comments</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
                       </TableRow>
@@ -1525,7 +1571,10 @@ export function QuotationImportWizard({
                           <TableCell className="text-xs">{d.leaf ?? '—'}</TableCell>
                           <TableCell className="font-mono text-xs">{d.door_size ?? '—'}</TableCell>
                           <TableCell>
-                            <HardwareCell hardware={d.hardware} headers={hwHeaders} prepValues={d.prep_values} />
+                            <HardwareCell hardware={d.hardware} headers={hwHeaders} prepValues={d.prep_values} part="builder" />
+                          </TableCell>
+                          <TableCell>
+                            <HardwareCell hardware={d.hardware} headers={hwHeaders} prepValues={d.prep_values} part="prep" />
                           </TableCell>
                           <TableCell>
                             <CommentsCell doors={[d]} />
@@ -1545,7 +1594,8 @@ export function QuotationImportWizard({
                         <TableHead>Door Ref</TableHead>
                         <TableHead>Room Name</TableHead>
                         <TableHead>Door Specs</TableHead>
-                        <TableHead>Hardware</TableHead>
+                        <TableHead>Builder HW</TableHead>
+                        <TableHead>Prep / Install</TableHead>
                         <TableHead className="text-right">Qty</TableHead>
                         <TableHead>Door Group</TableHead>
                       </TableRow>
@@ -1560,7 +1610,10 @@ export function QuotationImportWizard({
                             {door ? [door.classification, door.leaf, door.door_size].filter(Boolean).join(' · ') : '—'}
                           </TableCell>
                           <TableCell>
-                            <HardwareCell hardware={door?.hardware} headers={hwHeaders} prepValues={door?.prep_values} />
+                            <HardwareCell hardware={door?.hardware} headers={hwHeaders} prepValues={door?.prep_values} part="builder" />
+                          </TableCell>
+                          <TableCell>
+                            <HardwareCell hardware={door?.hardware} headers={hwHeaders} prepValues={door?.prep_values} part="prep" />
                           </TableCell>
                           <TableCell className="font-mono text-xs text-right">{v.qty ?? '—'}</TableCell>
                           <TableCell className="text-xs">
@@ -1670,7 +1723,12 @@ export function QuotationImportWizard({
                               </Badge>
                             </TableCell>
                             <TableCell className="text-xs">{issue.rawRef ?? '—'}</TableCell>
-                            <TableCell className="text-xs">{issue.message}</TableCell>
+                            <TableCell className="text-xs">
+                              {issue.message}
+                              {issue.splits && issue.splits.length > 1 && (
+                                <SplitGroupsTable splits={issue.splits} headers={hwHeaders} />
+                              )}
+                            </TableCell>
                           </TableRow>
                         ))
                       )}
@@ -1832,7 +1890,8 @@ export function QuotationImportWizard({
             onConfirm={confirmDraftMerge}
           />
 
-          <div className="max-h-96 overflow-y-auto border border-neutral-200">
+          {/* Up to 70% of the screen height, like the upload step's lists. */}
+          <div className="max-h-[70vh] overflow-y-auto border border-neutral-200">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -1970,12 +2029,10 @@ export function QuotationImportWizard({
                           </select>
 
                           {item.matchStatus === 'manual' && !item.matchedSetId && (
-                            <Input
+                            <CustomGroupInput
                               aria-label={`Custom door group for ${g.room_name}`}
                               value={item.customGroupName}
-                              onChange={(e) =>
-                                updateCustomGroupName(g.group_key, e.target.value)
-                              }
+                              onCommit={(name) => updateCustomGroupName(g.group_key, name)}
                               placeholder="Type custom door group..."
                               className="h-8 w-full max-w-xs text-xs"
                             />
@@ -1995,16 +2052,19 @@ export function QuotationImportWizard({
                         )}
                         <span>{item.matchReason || '—'}</span>
                         {(sizedLinesByGroup.get(g.group_key)?.flagNotes.length ?? 0) > 0 && (
-                          <div className="mt-1 text-[11px] text-neutral-700">
-                            <span className="font-semibold">From the schedule:</span>{' '}
-                            {sizedLinesByGroup.get(g.group_key)?.flagNotes.join('; ')}
-                          </div>
+                          <NoteList
+                            title="Changed from the quotation"
+                            notes={sizedLinesByGroup.get(g.group_key)?.flagNotes ?? []}
+                            testId="schedule-notes"
+                            grouped
+                          />
                         )}
                         {(sizedLinesByGroup.get(g.group_key)?.notes.length ?? 0) > 0 && (
-                          <div className="mt-1 text-[11px] text-neutral-700">
-                            <span className="font-semibold">Sized for {g.door_size}:</span>{' '}
-                            {sizedLinesByGroup.get(g.group_key)?.notes.join('; ')}
-                          </div>
+                          <NoteList
+                            title={`Sized for ${g.door_size}`}
+                            notes={sizedLinesByGroup.get(g.group_key)?.notes ?? []}
+                            testId="sizing-notes"
+                          />
                         )}
                         {item.matchStatus === 'auto' &&
                           item.matchedSetId &&
@@ -2102,19 +2162,26 @@ export function QuotationImportWizard({
 
       {/* Footer Navigation */}
       <div className="flex items-center justify-between border-t border-neutral-200 pt-4">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={step === 0 || importMutation.isPending}
-          onClick={() => {
-            setStepError(null)
-            setStep((s) => Math.max(0, s - 1))
-          }}
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          <span>Back</span>
-        </Button>
+        {step === 0 && parseResult ? (
+          <Button type="button" variant="outline" size="sm" disabled={parsing} onClick={uploadAgain}>
+            <Upload className="h-3.5 w-3.5" />
+            <span>Upload again</span>
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={step === 0 || importMutation.isPending}
+            onClick={() => {
+              setStepError(null)
+              setStep((s) => Math.max(0, s - 1))
+            }}
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            <span>Back</span>
+          </Button>
+        )}
 
         {step < 2 ? (
           <Button
@@ -2136,11 +2203,18 @@ export function QuotationImportWizard({
           <Button
             type="button"
             size="sm"
-            disabled={importMutation.isPending}
-            onClick={() => importMutation.mutate()}
+            disabled={importMutation.isPending || (lookupsLoading && !lookupsFailed)}
+            onClick={() => (lookupsFailed ? retryLookups() : importMutation.mutate())}
+            title={lookupsFailed ? "The parts library or generic items didn't load" : undefined}
           >
             <span>
-              {importMutation.isPending ? 'Saving...' : targetLabel}
+              {importMutation.isPending
+                ? 'Saving...'
+                : lookupsFailed
+                  ? "Parts didn't load — retry"
+                  : lookupsLoading
+                    ? 'Loading parts…'
+                    : targetLabel}
             </span>
           </Button>
         )}

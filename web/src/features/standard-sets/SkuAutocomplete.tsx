@@ -3,6 +3,9 @@ import type { Part } from '@/types/database'
 import { Input } from '@/components/ui/input'
 import { formatCurrency } from '@/lib/utils'
 
+/** Options with this id prefix are generic set items, not parts (migration 027). */
+export const GENERIC_OPTION_PREFIX = 'generic:'
+
 interface SkuAutocompleteProps {
   id?: string
   value: string
@@ -152,9 +155,11 @@ export function SkuAutocomplete({
                   </div>
                 </div>
                 <div className="font-mono shrink-0 text-[11px]">
-                  {part.unit_cost === null
-                    ? 'No price'
-                    : formatCurrency(Number(part.unit_cost))}
+                  {part.id.startsWith(GENERIC_OPTION_PREFIX)
+                    ? 'Generic'
+                    : part.unit_cost === null
+                      ? 'No price'
+                      : formatCurrency(Number(part.unit_cost))}
                 </div>
               </li>
             )

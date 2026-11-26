@@ -41,6 +41,8 @@ export interface SizingPart {
   active: boolean;
   /** The parts library folder's name, when known ("Electronic & security (by others)"). */
   folder?: string;
+  /** The parts library folder, when known (generic set items resolve within it). */
+  folder_id?: string | null;
 }
 
 export interface SizingLine {
